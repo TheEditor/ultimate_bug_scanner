@@ -21,7 +21,7 @@ curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scan
 
 ## 💥 **The Problem: AI Moves Fast, Bugs Move Faster**
 
-You're coding at the speed of thought with Claude, ChatGPT, Cursor, or your favorite AI assistant. You're shipping features in minutes that used to take days. **But here's the painful truth:**
+You're coding faster than ever with Claude Code, Codex, Cursor, and other AI coding agents. You're shipping features in minutes that used to take days. **But here's the painful truth:**
 
 ### **Even the best AI makes these mistakes:**
 
@@ -50,7 +50,7 @@ if (calculatedValue === NaN) {  // 💥 This NEVER works (always false)
 const zipCode = parseInt(userInput);  // 💥 "08" becomes 0 in old browsers (octal!)
 ```
 
-**Each of these bugs costs 3-6 hours to debug in production.** You've probably hit all of them.
+**Each of these bugs could cost 3-6 hours to debug in production.** You've probably hit all of them.
 
 ---
 
@@ -79,12 +79,11 @@ Summary Statistics:
 
 ✨ EXCELLENT! No critical issues found ✨
 
-All those bugs you DIDN'T ship? You're welcome.
 ```
 
 ---
 
-## ⚡ **Why Developers + AI Agents Love This Tool**
+## ⚡ **Why Developers + AI Agents Will Love This Tool**
 
 ### 🚀 **1. Catches What Humans & AI Miss**
 
@@ -189,10 +188,6 @@ Unlike traditional linters that fight AI-generated code, this scanner **embraces
 </td>
 </tr>
 </table>
-
-**Conservative estimate:** This scanner saves the average developer **40-60 hours per quarter** in debugging time.
-
-At $100/hour, that's **$4,000-$6,000 in value** from a free tool that installs in 30 seconds.
 
 ---
 
