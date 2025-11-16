@@ -11,8 +11,8 @@ if [[ ! -x "$UBS_BIN" ]]; then
 fi
 
 cases=(
-  "js-buggy:$ROOT_DIR/buggy:fail"
-  "js-clean:$ROOT_DIR/clean:pass"
+  "js-buggy:$ROOT_DIR/js/buggy:fail"
+  "js-clean:$ROOT_DIR/js/clean:pass"
   "python-buggy:$ROOT_DIR/python/buggy:fail"
   "python-clean:$ROOT_DIR/python/clean:pass"
   "cpp-buggy:$ROOT_DIR/cpp/buggy:fail"
