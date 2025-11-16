@@ -727,6 +727,18 @@ severity: info
 message: "Tempfile/tmpdir without block can leak; use block form to ensure cleanup."
 YAML
 
+  cat >"$AST_RULE_DIR/ruby-resource-thread.yml" <<'YAML'
+id: ruby.resource.thread-no-join
+language: ruby
+rule:
+  pattern: $VAR = Thread.new($ARGS)
+  not:
+    inside:
+      pattern: $VAR.join
+severity: warning
+message: "Thread handle created without join() in the same scope."
+YAML
+
   cat >"$AST_RULE_DIR/rails-constantize.yml" <<'YAML'
 id: rails.constantize
 language: ruby
@@ -1262,10 +1274,10 @@ if [ "$count" -gt 2 ]; then print_finding "info" "$count" "Use system('cmd', arg
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
-# CATEGORY 8: I/O & RESOURCE SAFETY
+# CATEGORY 8: I/O & RESOURCE LIFECYCLE CORRELATION
 # ═══════════════════════════════════════════════════════════════════════════
 if should_skip 8; then
-print_header "8. I/O & RESOURCE SAFETY"
+print_header "8. I/O & RESOURCE LIFECYCLE CORRELATION"
 print_category "Detects: File.open without block, Dir.chdir global effects, Tempfile misuse" \
   "Use blocks to auto-close and avoid global state surprises."
 

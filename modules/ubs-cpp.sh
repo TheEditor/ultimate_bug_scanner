@@ -605,6 +605,33 @@ severity: info
 message: "Erasing invalidates iterators; verify loop iteration is safe."
 YAML
 
+  cat >"$AST_RULE_DIR/cpp-resource-thread.yml" <<'YAML'
+id: cpp.resource.thread-no-join
+language: cpp
+rule:
+  pattern: std::thread $HANDLE($ARGS);
+  not:
+    inside:
+      pattern: $HANDLE.join()
+  not:
+    inside:
+      pattern: $HANDLE.detach()
+severity: warning
+message: "std::thread created without join()/detach() in the same scope."
+YAML
+
+  cat >"$AST_RULE_DIR/cpp-resource-malloc.yml" <<'YAML'
+id: cpp.resource.malloc-no-free
+language: cpp
+rule:
+  pattern: $VAR = malloc($ARGS);
+  not:
+    inside:
+      pattern: free($VAR)
+severity: warning
+message: "malloc assigned to a variable without free() in the same scope."
+YAML
+
   cat >"$AST_RULE_DIR/cpp-return-local-ref.yml" <<'YAML'
 id: cpp.return-local-reference
 language: cpp

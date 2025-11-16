@@ -471,6 +471,30 @@ severity: info
 message: "context.With* called without a deferred cancel() in the same scope (heuristic)."
 YAML
 
+  cat >"$AST_RULE_DIR/go-resource-ticker.yml" <<'YAML'
+id: go.resource.ticker-no-stop
+language: go
+rule:
+  pattern: $TICKER := time.NewTicker($ARGS)
+  not:
+    inside:
+      pattern: $TICKER.Stop()
+severity: warning
+message: "time.NewTicker result not stopped in the same scope."
+YAML
+
+  cat >"$AST_RULE_DIR/go-resource-timer.yml" <<'YAML'
+id: go.resource.timer-no-stop
+language: go
+rule:
+  pattern: $TIMER := time.NewTimer($ARGS)
+  not:
+    inside:
+      pattern: $TIMER.Stop()
+severity: warning
+message: "time.NewTimer result not stopped or drained in the same scope."
+YAML
+
   # ───── HTTP Client/Server ────────────────────────────────────────────────
   cat >"$AST_RULE_DIR/go-http-default-client.yml" <<'YAML'
 id: go.http-default-client

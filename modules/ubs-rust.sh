@@ -727,6 +727,33 @@ severity: warning
 message: "std::thread::spawn inside async fn; prefer tokio::spawn or task::spawn_blocking"
 YAML
 
+  cat >"$AST_RULE_DIR/rust.resource-thread.yml" <<'YAML'
+id: rust.resource.thread-no-join
+language: rust
+rule:
+  pattern: let $HANDLE = std::thread::spawn($ARGS);
+  not:
+    inside:
+      pattern: $HANDLE.join()
+severity: warning
+message: "std::thread::spawn handle not joined in the same scope."
+YAML
+
+  cat >"$AST_RULE_DIR/rust.resource-tokio-task.yml" <<'YAML'
+id: rust.resource.tokio-task-no-await
+language: rust
+rule:
+  pattern: let $TASK = tokio::spawn($ARGS);
+  not:
+    inside:
+      pattern: $TASK.await
+  not:
+    inside:
+      pattern: $TASK.abort()
+severity: warning
+message: "tokio::spawn task handle not awaited or aborted."
+YAML
+
   # Performance / allocation
   cat >"$AST_RULE_DIR/clone-any.yml" <<'YAML'
 id: rust.clone-call

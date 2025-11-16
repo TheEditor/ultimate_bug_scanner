@@ -566,6 +566,21 @@ severity: warning
 message: "newCachedThreadPool has unbounded threads; ensure backpressure"
 YAML
 
+  cat >"$AST_RULE_DIR/java-resource-executor.yml" <<'YAML'
+id: java.resource.executor-no-shutdown
+language: java
+rule:
+  pattern: java.util.concurrent.ExecutorService $EXEC = java.util.concurrent.Executors.$FACTORY($ARGS);
+  not:
+    inside:
+      pattern: $EXEC.shutdown()
+  not:
+    inside:
+      pattern: $EXEC.shutdownNow()
+severity: warning
+message: "ExecutorService created without shutdown()/shutdownNow() in the same scope."
+YAML
+
   cat >"$AST_RULE_DIR/thread-sleep-in-sync.yml" <<'YAML'
 id: java.thread-sleep-in-synchronized
 language: java
@@ -1309,10 +1324,10 @@ if [ "$set_access" -gt 0 ]; then print_finding "info" "$set_access" "setAccessib
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
-# CATEGORY 19: RESOURCE SAFETY & TRY-WITH-RESOURCES (heuristics)
+# CATEGORY 19: RESOURCE SAFETY & RESOURCE LIFECYCLE CORRELATION
 # ═══════════════════════════════════════════════════════════════════════════
 if should_run 19; then
-print_header "19. RESOURCE SAFETY & TRY-WITH-RESOURCES"
+print_header "19. RESOURCE SAFETY & RESOURCE LIFECYCLE CORRELATION"
 print_category "Detects: stream/reader/writer creation; nudge toward try-with-resources" \
   "Prefer try-with-resources to ensure deterministic close()"
 
