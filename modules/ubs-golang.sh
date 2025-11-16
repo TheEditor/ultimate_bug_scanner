@@ -824,17 +824,23 @@ rand_count=$("${GREP_RN[@]}" -e "\bmath/rand\b|\brand\.Seed\(|\brand\.Read\(" "$
 if [ "$rand_count" -gt 0 ]; then print_finding "info" "$rand_count" "math/rand present - avoid for secrets; prefer crypto/rand"; fi
 
 print_subheader "TLS InsecureSkipVerify=true"
-count=$(
-  ( [[ "$HAS_AST_GREP" -eq 1 ]] && "${AST_GREP_CMD[@]}" scan -r "$AST_RULE_DIR" "$PROJECT_DIR" --json 2>/dev/null || true ) \
-  | grep -c '"id"[ ]*:[ ]*"go.tls-insecure-skip"' || true
-)
+count=0
+if [ "$HAS_AST_GREP" -eq 1 ]; then
+  count=$("${AST_GREP_CMD[@]}" scan -r "$AST_RULE_DIR" "$PROJECT_DIR" --json 2>/dev/null | grep -c '"id"[ ]*:[ ]*"go.tls-insecure-skip"' || true)
+fi
+if [ "$count" -eq 0 ]; then
+  count=$(rg --no-config --no-messages -n "InsecureSkipVerify:[[:space:]]*true" "$PROJECT_DIR" 2>/dev/null | wc -l | awk '{print $1+0}')
+fi
 if [ "$count" -gt 0 ]; then print_finding "warning" "$count" "InsecureSkipVerify enabled"; fi
 
 print_subheader "exec sh -c (command injection risk)"
-count=$(
-  ( [[ "$HAS_AST_GREP" -eq 1 ]] && "${AST_GREP_CMD[@]}" scan -r "$AST_RULE_DIR" "$PROJECT_DIR" --json 2>/dev/null || true ) \
-  | grep -c '"id"[ ]*:[ ]*"go.exec-sh-c"' || true
-)
+count=0
+if [ "$HAS_AST_GREP" -eq 1 ]; then
+  count=$("${AST_GREP_CMD[@]}" scan -r "$AST_RULE_DIR" "$PROJECT_DIR" --json 2>/dev/null | grep -c '"id"[ ]*:[ ]*"go.exec-sh-c"' || true)
+fi
+if [ "$count" -eq 0 ]; then
+  count=$(rg --no-config --no-messages -n 'exec\.Command(Context)?\(\s*"(sh|bash)"\s*,\s*"-?c"' "$PROJECT_DIR" 2>/dev/null | wc -l | awk '{print $1+0}')
+fi
 if [ "$count" -gt 0 ]; then print_finding "critical" "$count" "exec.Command(*, \"sh\", \"-c\", ...) detected"; fi
 fi
 

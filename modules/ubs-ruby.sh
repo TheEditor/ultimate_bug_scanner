@@ -788,10 +788,10 @@ if [ "$count" -gt 0 ]; then
 fi
 
 print_subheader "Backticks / %x() command execution"
-count=$("${GREP_RN[@]}" -e "\`[^`]*\`|%x\([^)]*\)" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+count=$("${GREP_RN[@]}" -e '\`[^`]*\`|%x\([^)]*\)' "$PROJECT_DIR" 2>/dev/null | count_lines || true)
 if [ "$count" -gt 0 ]; then
   print_finding "warning" "$count" "Backtick command execution" "Prefer system with argv array and validate inputs"
-  show_detailed_finding "\`[^`]*\`|%x\([^)]*\)" 3
+  show_detailed_finding '\`[^`]*\`|%x\([^)]*\)' 3
 fi
 
 print_subheader "system/exec with single string (shell)"
