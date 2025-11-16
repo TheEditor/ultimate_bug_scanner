@@ -44,8 +44,8 @@ RUN_VERIFICATION=1
 
 # Temporary files tracking for cleanup
 TEMP_FILES=()
-# Lock file for concurrent execution prevention
-LOCK_FILE="/tmp/ubs-install-$$.lock"
+# Lock file for concurrent execution prevention (MUST be fixed name, not $$)
+LOCK_FILE="/tmp/ubs-install.lock"
 
 cleanup_on_exit() {
   # Clean up temporary files
@@ -363,6 +363,52 @@ check_jq() {
 # TIER 1 ENHANCEMENTS: Version Checking, Binary Fallbacks, Verification
 # ==============================================================================
 
+version_compare() {
+  # Compare two version strings using semantic versioning
+  # Returns: 0 if $1 > $2, 1 if $1 <= $2
+  # Handles versions like: 4.5, 4.10, 4.9.1, 4.9.10, etc.
+  local ver1="$1"
+  local ver2="$2"
+
+  # If versions are identical, not greater
+  if [ "$ver1" = "$ver2" ]; then
+    return 1
+  fi
+
+  # Try sort -V (version sort) - but test it properly first
+  if echo "2.0" | sort -V >/dev/null 2>&1; then
+    # sort -V is available, use it
+    local sorted_first
+    sorted_first=$(printf '%s\n' "$ver1" "$ver2" | sort -V | head -n1)
+    if [ "$sorted_first" = "$ver2" ]; then
+      return 0  # ver1 > ver2
+    else
+      return 1  # ver1 <= ver2
+    fi
+  else
+    # Fallback: manual comparison for simple X.Y.Z versions
+    IFS='.' read -r -a v1_parts <<< "$ver1"
+    IFS='.' read -r -a v2_parts <<< "$ver2"
+
+    # Compare each component
+    local max_len="${#v1_parts[@]}"
+    [ "${#v2_parts[@]}" -gt "$max_len" ] && max_len="${#v2_parts[@]}"
+
+    for ((i=0; i<max_len; i++)); do
+      local part1="${v1_parts[i]:-0}"
+      local part2="${v2_parts[i]:-0}"
+
+      if [ "$part1" -gt "$part2" ] 2>/dev/null; then
+        return 0  # ver1 > ver2
+      elif [ "$part1" -lt "$part2" ] 2>/dev/null; then
+        return 1  # ver1 < ver2
+      fi
+    done
+
+    return 1  # versions are equal
+  fi
+}
+
 check_for_updates() {
   [ "$SKIP_VERSION_CHECK" -eq 1 ] && return 0
 
@@ -375,7 +421,8 @@ check_for_updates() {
     # Strip whitespace
     latest_version=$(echo "$latest_version" | tr -d '[:space:]')
 
-    if [ "$current_version" != "$latest_version" ]; then
+    # Compare versions properly using semantic versioning
+    if version_compare "$latest_version" "$current_version"; then
       warn "New version available: $latest_version (you have $current_version)"
       if ask "Update to latest version now?"; then
         log "Re-running installer with latest version..."
@@ -431,15 +478,21 @@ download_binary_release() {
 
       if curl -fsSL "$url" -o /tmp/ripgrep.tar.gz 2>/dev/null; then
         if tar -xzf /tmp/ripgrep.tar.gz -C /tmp 2>/dev/null; then
-          if [ -f "/tmp/${tarball_dir}/rg" ]; then
-            mv "/tmp/${tarball_dir}/rg" "$install_dir/rg"
-            chmod +x "$install_dir/rg"
-            rm -rf /tmp/ripgrep.tar.gz "/tmp/${tarball_dir}"
+          # Find rg binary robustly (handles archive structure changes)
+          local rg_binary
+          rg_binary=$(find /tmp/ripgrep-* -name "rg" -type f 2>/dev/null | head -1)
+          if [ -n "$rg_binary" ] && [ -f "$rg_binary" ]; then
+            chmod +x "$rg_binary" 2>/dev/null
+            mv "$rg_binary" "$install_dir/rg"
+            rm -rf /tmp/ripgrep.tar.gz /tmp/ripgrep-* 2>/dev/null
             success "ripgrep binary installed to $install_dir/rg"
             return 0
+          else
+            warn "Could not find rg binary in downloaded archive"
           fi
         fi
       fi
+      rm -rf /tmp/ripgrep.tar.gz /tmp/ripgrep-* 2>/dev/null
       ;;
 
     ast-grep)
@@ -458,21 +511,26 @@ download_binary_release() {
       if curl -fsSL "$url" -o /tmp/ast-grep.zip 2>/dev/null; then
         if command -v unzip >/dev/null 2>&1; then
           if unzip -q /tmp/ast-grep.zip -d /tmp/ast-grep 2>/dev/null; then
-            if [ -f "/tmp/ast-grep/ast-grep" ]; then
-              mv "/tmp/ast-grep/ast-grep" "$install_dir/ast-grep"
-              chmod +x "$install_dir/ast-grep"
+            # Find ast-grep binary robustly (handles archive structure changes)
+            local sg_binary
+            sg_binary=$(find /tmp/ast-grep -name "ast-grep" -o -name "sg" 2>/dev/null | head -1)
+            if [ -n "$sg_binary" ] && [ -f "$sg_binary" ]; then
+              chmod +x "$sg_binary" 2>/dev/null
+              mv "$sg_binary" "$install_dir/ast-grep"
               rm -rf /tmp/ast-grep.zip /tmp/ast-grep
               success "ast-grep binary installed to $install_dir/ast-grep"
               # Ensure $install_dir is in PATH for this session
               export PATH="$install_dir:$PATH"
               return 0
+            else
+              warn "Could not find ast-grep binary in downloaded archive"
             fi
           fi
         else
           warn "unzip not available, cannot extract ast-grep"
         fi
       fi
-      rm -f /tmp/ast-grep.zip
+      rm -rf /tmp/ast-grep.zip /tmp/ast-grep 2>/dev/null
       ;;
 
     jq)
@@ -1402,8 +1460,9 @@ install_scanner() {
     fi
 
     # Verify shebang (strip UTF-8 BOM if present, then check for bash shebang)
+    # Use octal escapes for BSD/macOS compatibility (\357\273\277 = 0xEF 0xBB 0xBF)
     local first_line
-    first_line=$(head -n 1 "$temp_path" | sed 's/^\xEF\xBB\xBF//' | tr -d '\r\n\t ' | head -c 50)
+    first_line=$(head -n 1 "$temp_path" | sed 's/^\o357\o273\o277//' | tr -d '\r\n\t ' | head -c 50)
     if [[ ! "$first_line" =~ ^#!.*bash ]]; then
       error "Downloaded file doesn't appear to be a bash script"
       log "First line: $(head -n 1 "$temp_path" | cat -v)"
