@@ -2,7 +2,7 @@
   "version": 1,
   "defaults": {
     "ubs_bin": "../ubs",
-    "args": ["--format=json", "--ci"],
+    "args": ["--ci"],
     "env": {
       "NO_COLOR": "1"
     },
@@ -21,7 +21,10 @@
         "totals": {
           "critical": {"min": 1},
           "warning": {"min": 1}
-        }
+        },
+        "require_substrings": [
+          "NULL SAFETY & DEFENSIVE PROGRAMMING"
+        ]
       }
     },
     {
@@ -51,7 +54,10 @@
         "totals": {
           "critical": {"min": 1},
           "warning": {"min": 1}
-        }
+        },
+        "require_substrings": [
+          "SECURITY VULNERABILITIES"
+        ]
       }
     },
     {
@@ -81,7 +87,10 @@
         "totals": {
           "critical": {"min": 1},
           "warning": {"min": 10}
-        }
+        },
+        "require_substrings": [
+          "MATH & ARITHMETIC PITFALLS"
+        ]
       }
     },
     {
@@ -111,7 +120,10 @@
         "totals": {
           "critical": {"min": 1},
           "warning": {"min": 1}
-        }
+        },
+        "require_substrings": [
+          "ASYNC/AWAIT PITFALLS"
+        ]
       }
     },
     {

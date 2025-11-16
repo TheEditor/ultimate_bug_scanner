@@ -174,6 +174,34 @@ START_TS=""
 END_TS=""
 START_TS="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%s')"
 
+# Resource lifecycle correlation spec (acquire vs release pairs)
+RESOURCE_LIFECYCLE_IDS=(executor_shutdown thread_join jdbc_close)
+declare -A RESOURCE_LIFECYCLE_SEVERITY=(
+  [executor_shutdown]="critical"
+  [thread_join]="warning"
+  [jdbc_close]="warning"
+)
+declare -A RESOURCE_LIFECYCLE_ACQUIRE=(
+  [executor_shutdown]='Executors?\.[A-Za-z_]+\('
+  [thread_join]='new[[:space:]]+Thread\('
+  [jdbc_close]='(DriverManager|DataSource)\.getConnection\('
+)
+declare -A RESOURCE_LIFECYCLE_RELEASE=(
+  [executor_shutdown]='\.shutdown(Now)?\('
+  [thread_join]='\.join\('
+  [jdbc_close]='\.close\(|try[[:space:]]*\([^)]*Connection[[:space:]]+[A-Za-z_][A-Za-z0-9_]*'
+)
+declare -A RESOURCE_LIFECYCLE_SUMMARY=(
+  [executor_shutdown]='ExecutorService created without shutdown'
+  [thread_join]='Thread started without join()'
+  [jdbc_close]='JDBC connection acquired without close()'
+)
+declare -A RESOURCE_LIFECYCLE_REMEDIATION=(
+  [executor_shutdown]='Store the ExecutorService and call shutdown()/shutdownNow() in finally blocks'
+  [thread_join]='Join threads or use executors to avoid orphaned workers'
+  [jdbc_close]='Use try-with-resources or explicitly close connections'
+)
+
 # ────────────────────────────────────────────────────────────────────────────
 # Search engine configuration (rg if available, else grep)
 # ────────────────────────────────────────────────────────────────────────────
@@ -270,6 +298,46 @@ show_detailed_finding() {
     print_code_sample "$file" "$line" "$code"; printed=$((printed+1))
     [[ $printed -ge $limit || $printed -ge $MAX_DETAILED ]] && break
   done < <("${GREP_RN[@]}" -e "$pattern" "$PROJECT_DIR" 2>/dev/null | head -n "$limit" || true) || true
+}
+
+run_resource_lifecycle_checks() {
+  local header_shown=0
+  local rid
+  for rid in "${RESOURCE_LIFECYCLE_IDS[@]}"; do
+    local acquire_regex="${RESOURCE_LIFECYCLE_ACQUIRE[$rid]:-}"
+    local release_regex="${RESOURCE_LIFECYCLE_RELEASE[$rid]:-}"
+    [[ -z "$acquire_regex" || -z "$release_regex" ]] && continue
+    local file_list
+    file_list=$("${GREP_RN[@]}" -e "$acquire_regex" "$PROJECT_DIR" 2>/dev/null | cut -d: -f1 | sort -u || true)
+    [[ -n "$file_list" ]] || continue
+    while IFS= read -r file; do
+      [[ -z "$file" ]] && continue
+      local acquire_hits release_hits
+      acquire_hits=$("${GREP_RN[@]}" -e "$acquire_regex" "$file" 2>/dev/null | count_lines || true)
+      release_hits=$("${GREP_RN[@]}" -e "$release_regex" "$file" 2>/dev/null | count_lines || true)
+      acquire_hits=${acquire_hits:-0}
+      release_hits=${release_hits:-0}
+      if (( acquire_hits > release_hits )); then
+        if [[ $header_shown -eq 0 ]]; then
+          print_subheader "Resource lifecycle correlation"
+          header_shown=1
+        fi
+        local delta=$((acquire_hits - release_hits))
+        local relpath=${file#"$PROJECT_DIR"/}
+        [[ "$relpath" == "$file" ]] && relpath="$file"
+        local summary="${RESOURCE_LIFECYCLE_SUMMARY[$rid]:-Resource imbalance}"
+        local remediation="${RESOURCE_LIFECYCLE_REMEDIATION[$rid]:-Ensure matching cleanup call}"
+        local severity="${RESOURCE_LIFECYCLE_SEVERITY[$rid]:-warning}"
+        local title="$summary [$relpath]"
+        local desc="$remediation (acquire=$acquire_hits, release=$release_hits)"
+        print_finding "$severity" "$delta" "$title" "$desc"
+      fi
+    done <<<"$file_list"
+  done
+  if [[ $header_shown -eq 0 ]]; then
+    print_subheader "Resource lifecycle correlation"
+    print_finding "good" "All tracked resource acquisitions have matching cleanups"
+  fi
 }
 
 show_ast_examples() {
@@ -1256,6 +1324,8 @@ if [ "$io_ctor" -gt 0 ]; then
 else
   print_finding "good" "No I/O constructors detected"
 fi
+
+run_resource_lifecycle_checks
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════

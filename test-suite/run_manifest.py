@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -50,6 +51,29 @@ def extract_json_from_stdout(stdout: str) -> Optional[Dict[str, Any]]:
             except json.JSONDecodeError:
                 continue
     return None
+
+
+def parse_text_summary(stdout: str, project_label: str) -> Optional[Dict[str, Any]]:
+    marker = "──────── Combined Summary"
+    if marker not in stdout:
+        return None
+    block = stdout.split(marker, 1)[-1]
+    files = re.search(r"Files:\s+(\d+)", block)
+    critical = re.search(r"Critical:\s+(\d+)", block)
+    warning = re.search(r"Warning:\s+(\d+)", block)
+    info = re.search(r"Info:\s+(\d+)", block)
+    if not (files and critical and warning and info):
+        return None
+    return {
+        "project": project_label,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "totals": {
+            "files": int(files.group(1)),
+            "critical": int(critical.group(1)),
+            "warning": int(warning.group(1)),
+            "info": int(info.group(1)),
+        },
+    }
 
 
 def ensure_dir(path: Path) -> None:
@@ -170,7 +194,9 @@ def main() -> None:
         summary = extract_json_from_stdout(proc.stdout)
         summary_error = None
         if summary is None:
-            summary_error = "Unable to parse UBS JSON output"
+            summary = parse_text_summary(proc.stdout, case_path_arg)
+            if summary is None:
+                summary_error = "Unable to parse UBS output"
         summary_blob = {
             "id": case_id,
             "command": cmd,

@@ -189,6 +189,34 @@ HAS_RIPGREP=0
 HAS_BUNDLE=0
 BUNDLE_EXEC=()
 
+# Resource lifecycle correlation spec (acquire vs release pairs)
+RESOURCE_LIFECYCLE_IDS=(file_handle thread_join http_session)
+declare -A RESOURCE_LIFECYCLE_SEVERITY=(
+  [file_handle]="critical"
+  [thread_join]="warning"
+  [http_session]="warning"
+)
+declare -A RESOURCE_LIFECYCLE_ACQUIRE=(
+  [file_handle]='File\.open'
+  [thread_join]='Thread\.new'
+  [http_session]='Net::HTTP\.start'
+)
+declare -A RESOURCE_LIFECYCLE_RELEASE=(
+  [file_handle]='\.close|File\.open[^\n]*do\b|File\.open[^\n]*\{[[:space:]]*\|'
+  [thread_join]='\.join'
+  [http_session]='\.finish\(|Net::HTTP\.start[^\n]*(do\b|\{[[:space:]]*\|)'
+)
+declare -A RESOURCE_LIFECYCLE_SUMMARY=(
+  [file_handle]='File handles opened without close or block'
+  [thread_join]='Ruby threads started without join'
+  [http_session]='Net::HTTP sessions missing finish()'
+)
+declare -A RESOURCE_LIFECYCLE_REMEDIATION=(
+  [file_handle]='Use File.open with a block or ensure close() in ensure'
+  [thread_join]='Join threads or monitor them to avoid background zombies'
+  [http_session]='Call finish() or use the block form of Net::HTTP.start'
+)
+
 # ────────────────────────────────────────────────────────────────────────────
 # Search engine configuration (rg if available, else grep) + include/exclude
 # ────────────────────────────────────────────────────────────────────────────
@@ -290,6 +318,46 @@ show_detailed_finding() {
     print_code_sample "$file" "$line" "$code"; printed=$((printed+1))
     [[ $printed -ge $limit || $printed -ge $MAX_DETAILED ]] && break
   done < <("${GREP_RN[@]}" -e "$pattern" "$PROJECT_DIR" 2>/dev/null | head -n "$limit" || true) || true
+}
+
+run_resource_lifecycle_checks() {
+  local header_shown=0
+  local rid
+  for rid in "${RESOURCE_LIFECYCLE_IDS[@]}"; do
+    local acquire_regex="${RESOURCE_LIFECYCLE_ACQUIRE[$rid]:-}"
+    local release_regex="${RESOURCE_LIFECYCLE_RELEASE[$rid]:-}"
+    [[ -z "$acquire_regex" || -z "$release_regex" ]] && continue
+    local file_list
+    file_list=$("${GREP_RN[@]}" -e "$acquire_regex" "$PROJECT_DIR" 2>/dev/null | cut -d: -f1 | sort -u || true)
+    [[ -n "$file_list" ]] || continue
+    while IFS= read -r file; do
+      [[ -z "$file" ]] && continue
+      local acquire_hits release_hits
+      acquire_hits=$("${GREP_RN[@]}" -e "$acquire_regex" "$file" 2>/dev/null | count_lines || true)
+      release_hits=$("${GREP_RN[@]}" -e "$release_regex" "$file" 2>/dev/null | count_lines || true)
+      acquire_hits=${acquire_hits:-0}
+      release_hits=${release_hits:-0}
+      if (( acquire_hits > release_hits )); then
+        if [[ $header_shown -eq 0 ]]; then
+          print_subheader "Resource lifecycle correlation"
+          header_shown=1
+        fi
+        local delta=$((acquire_hits - release_hits))
+        local relpath=${file#"$PROJECT_DIR"/}
+        [[ "$relpath" == "$file" ]] && relpath="$file"
+        local summary="${RESOURCE_LIFECYCLE_SUMMARY[$rid]:-Resource imbalance}"
+        local remediation="${RESOURCE_LIFECYCLE_REMEDIATION[$rid]:-Ensure matching cleanup call}"
+        local severity="${RESOURCE_LIFECYCLE_SEVERITY[$rid]:-warning}"
+        local title="$summary [$relpath]"
+        local desc="$remediation (acquire=$acquire_hits, release=$release_hits)"
+        print_finding "$severity" "$delta" "$title" "$desc"
+      fi
+    done <<<"$file_list"
+  done
+  if [[ $header_shown -eq 0 ]]; then
+    print_subheader "Resource lifecycle correlation"
+    print_finding "good" "All tracked resource acquisitions have matching cleanups"
+  fi
 }
 
 show_ast_samples_from_json() {
@@ -1218,6 +1286,8 @@ print_subheader "Tempfile / Dir.mktmpdir without blocks"
 count=$("${GREP_RN[@]}" -e "Tempfile\.new\(|Dir\.mktmpdir\(" "$PROJECT_DIR" 2>/dev/null | \
   (grep -E -v "do[[:space:]]*\||\{[[:space:]]*\|[^\|]*\|" || true) | count_lines)
 if [ "$count" -gt 0 ]; then print_finding "info" "$count" "Tempfile/tmpdir without block may leak"; fi
+
+run_resource_lifecycle_checks
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
