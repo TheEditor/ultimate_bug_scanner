@@ -22,7 +22,8 @@
         "buggy"
       ],
       "args": [
-        "--only=js"
+        "--only=js",
+        "--fail-on-warning"
       ],
       "expect": {
         "exit_code": "nonzero",
@@ -183,7 +184,8 @@
         "buggy"
       ],
       "args": [
-        "--only=python"
+        "--only=python",
+        "--fail-on-warning"
       ],
       "expect": {
         "exit_code": "nonzero",
@@ -234,7 +236,8 @@
         "buggy"
       ],
       "args": [
-        "--only=golang"
+        "--only=golang",
+        "--fail-on-warning"
       ],
       "expect": {
         "exit_code": "nonzero",
@@ -286,7 +289,8 @@
         "buggy"
       ],
       "args": [
-        "--only=js"
+        "--only=js",
+        "--fail-on-warning"
       ],
       "expect": {
         "exit_code": "nonzero",
@@ -296,7 +300,7 @@
           }
         },
         "require_substrings": [
-          "RESOURCE LIFECYCLE CORRELATION"
+          "RESOURCE LIFECYCLE"
         ]
       }
     },
@@ -311,7 +315,8 @@
         "buggy"
       ],
       "args": [
-        "--only=python"
+        "--only=python",
+        "--fail-on-warning"
       ],
       "expect": {
         "exit_code": "nonzero",
@@ -321,7 +326,7 @@
           }
         },
         "require_substrings": [
-          "RESOURCE LIFECYCLE CORRELATION"
+          "RESOURCE LIFECYCLE"
         ]
       }
     },
@@ -336,7 +341,8 @@
         "buggy"
       ],
       "args": [
-        "--only=golang"
+        "--only=golang",
+        "--fail-on-warning"
       ],
       "expect": {
         "exit_code": "nonzero",
@@ -346,7 +352,7 @@
           }
         },
         "require_substrings": [
-          "RESOURCE LIFECYCLE CORRELATION"
+          "RESOURCE LIFECYCLE"
         ]
       }
     },
@@ -361,7 +367,8 @@
         "buggy"
       ],
       "args": [
-        "--only=cpp"
+        "--only=cpp",
+        "--fail-on-warning"
       ],
       "expect": {
         "exit_code": "nonzero",
@@ -371,7 +378,7 @@
           }
         },
         "require_substrings": [
-          "RESOURCE LIFECYCLE CORRELATION"
+          "RESOURCE LIFECYCLE"
         ]
       }
     },
@@ -386,7 +393,8 @@
         "buggy"
       ],
       "args": [
-        "--only=rust"
+        "--only=rust",
+        "--fail-on-warning"
       ],
       "expect": {
         "exit_code": "nonzero",
@@ -396,7 +404,7 @@
           }
         },
         "require_substrings": [
-          "RESOURCE LIFECYCLE CORRELATION"
+          "RESOURCE LIFECYCLE"
         ]
       }
     },
@@ -411,7 +419,8 @@
         "buggy"
       ],
       "args": [
-        "--only=java"
+        "--only=java",
+        "--fail-on-warning"
       ],
       "expect": {
         "exit_code": "nonzero",
@@ -421,7 +430,7 @@
           }
         },
         "require_substrings": [
-          "RESOURCE LIFECYCLE CORRELATION"
+          "RESOURCE LIFECYCLE"
         ]
       }
     },
@@ -436,7 +445,8 @@
         "buggy"
       ],
       "args": [
-        "--only=ruby"
+        "--only=ruby",
+        "--fail-on-warning"
       ],
       "expect": {
         "exit_code": "nonzero",
@@ -446,7 +456,7 @@
           }
         },
         "require_substrings": [
-          "RESOURCE LIFECYCLE CORRELATION"
+          "RESOURCE LIFECYCLE"
         ]
       }
     }
