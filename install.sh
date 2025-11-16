@@ -677,8 +677,8 @@ create_alias() {
   install_dir="$(determine_install_dir)"
   local script_path="$install_dir/$INSTALL_NAME"
 
-  # Since the binary is named 'ubs' and will be in PATH, an alias isn't strictly needed
-  # But we'll create one for backward compatibility and to ensure it works immediately
+  # The binary is named 'ubs' and will be on PATH, but we also add an alias so
+  # the current shell session can use it immediately without restarting.
 
   local rc_file
   rc_file="$(get_rc_file)"
@@ -735,11 +735,11 @@ setup_claude_code_hook() {
 
 if [[ "$FILE_PATH" =~ \.(js|jsx|ts|tsx|mjs|cjs|py|pyw|pyi|c|cc|cpp|cxx|h|hh|hpp|hxx|rs|go|java|rb)$ ]]; then
   echo "🔬 Running bug scanner..."
-  if command -v ubs >/dev/null 2>&1; then
-    ubs "${PROJECT_DIR}" --ci 2>&1 | head -50
-  else
-    bug-scanner.sh "${PROJECT_DIR}" --ci 2>&1 | head -50
+  if ! command -v ubs >/dev/null 2>&1; then
+    echo "⚠️  'ubs' not found in PATH; install it before using this hook." >&2
+    exit 0
   fi
+  ubs "${PROJECT_DIR}" --ci 2>&1 | head -50
 fi
 HOOK_EOF
 
@@ -819,13 +819,12 @@ setup_git_hook() {
 
 echo "🔬 Running bug scanner..."
 
-if command -v ubs >/dev/null 2>&1; then
-  SCANNER="ubs"
-else
-  SCANNER="bug-scanner.sh"
+if ! command -v ubs >/dev/null 2>&1; then
+  echo "❌ 'ubs' command not found. Install Ultimate Bug Scanner before committing." >&2
+  exit 1
 fi
 
-if ! $SCANNER . --fail-on-warning 2>&1 | tee /tmp/bug-scan.txt | tail -30; then
+if ! ubs . --fail-on-warning 2>&1 | tee /tmp/bug-scan.txt | tail -30; then
   echo ""
   echo "❌ Bug scanner found issues. Fix them or use: git commit --no-verify"
   exit 1
