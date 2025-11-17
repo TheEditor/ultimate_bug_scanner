@@ -604,6 +604,81 @@
       }
     },
     {
+      "id": "js-type-narrowing-buggy",
+      "description": "TypeScript guard clauses that continue execution and later dereference unsafe values.",
+      "path": "test-suite/js/type_narrowing/buggy",
+      "language": "js",
+      "tags": [
+        "js",
+        "typescript",
+        "type-narrowing",
+        "buggy"
+      ],
+      "args": [
+        "--only=js",
+        "--fail-on-warning"
+      ],
+      "expect": {
+        "exit_code": "nonzero",
+        "totals": {
+          "warning": {
+            "min": 1
+          }
+        },
+        "require_substrings": [
+          "Type narrowing validation",
+          "Potentially unsafe type narrowing"
+        ]
+      }
+    },
+    {
+      "id": "js-type-narrowing-clean",
+      "description": "TypeScript fixtures with early returns so type narrowing stays silent on safe code.",
+      "path": "test-suite/js/type_narrowing/clean",
+      "language": "js",
+      "tags": [
+        "js",
+        "typescript",
+        "type-narrowing",
+        "clean"
+      ],
+      "args": [
+        "--only=js"
+      ],
+      "expect": {
+        "exit_code": "zero",
+        "totals": {
+          "warning": {
+            "max": 0
+          }
+        }
+      }
+    },
+    {
+      "id": "js-type-narrowing-skip",
+      "description": "Regression that verifies --skip-type-narrowing suppresses warnings on buggy TypeScript fixtures.",
+      "path": "test-suite/js/type_narrowing/buggy",
+      "language": "js",
+      "tags": [
+        "js",
+        "typescript",
+        "type-narrowing",
+        "skip"
+      ],
+      "args": [
+        "--only=js",
+        "--skip-type-narrowing"
+      ],
+      "expect": {
+        "exit_code": "zero",
+        "totals": {
+          "warning": {
+            "max": 0
+          }
+        }
+      }
+    },
+    {
       "id": "golang-async-errors-buggy",
       "description": "Go goroutines ignoring error paths (fire-and-forget http.Get).",
       "path": "test-suite/golang/async_errors/buggy",
@@ -972,6 +1047,104 @@
         "totals": {
           "warning": {
             "min": 1
+          }
+        }
+      }
+    },
+    {
+      "id": "rust-type-narrowing-buggy",
+      "description": "Rust fixtures that guard Options/Results but later unwrap/expect the same value despite the guard not exiting.",
+      "path": "test-suite/rust/buggy/type_narrowing.rs",
+      "language": "rust",
+      "tags": [
+        "rust",
+        "type-narrowing",
+        "buggy"
+      ],
+      "args": [
+        "--only=rust",
+        "--fail-on-warning"
+      ],
+      "expect": {
+        "exit_code": "nonzero",
+        "totals": {
+          "warning": {
+            "min": 1
+          }
+        },
+        "require_substrings": [
+          "Guarded Option/Result later unwrap",
+          "Guard clauses that still unwrap later"
+        ]
+      }
+    },
+    {
+      "id": "rust-type-narrowing-clean",
+      "description": "Rust fixtures that exit early or propagate via ? after guards, ensuring no false positives from the narrowing heuristics.",
+      "path": "test-suite/rust/clean/type_narrowing.rs",
+      "language": "rust",
+      "tags": [
+        "rust",
+        "type-narrowing",
+        "clean"
+      ],
+      "args": [
+        "--only=rust"
+      ],
+      "expect": {
+        "exit_code": "zero",
+        "totals": {
+          "warning": {
+            "max": 0
+          }
+        }
+      }
+    },
+    {
+      "id": "kotlin-type-narrowing-buggy",
+      "description": "Kotlin null guards that do not exit before using the guarded value with '!!'.",
+      "path": "test-suite/kotlin/type_narrowing/buggy",
+      "language": "java",
+      "tags": [
+        "kotlin",
+        "type-narrowing",
+        "buggy"
+      ],
+      "args": [
+        "--only=java",
+        "--fail-on-warning"
+      ],
+      "expect": {
+        "exit_code": "nonzero",
+        "totals": {
+          "warning": {
+            "min": 1
+          }
+        },
+        "require_substrings": [
+          "Kotlin guard clauses without exit",
+          "Kotlin guard without exit before '!!'"
+        ]
+      }
+    },
+    {
+      "id": "kotlin-type-narrowing-clean",
+      "description": "Kotlin fixtures that return/throw or Elvis out early so no '!!' panic is required.",
+      "path": "test-suite/kotlin/type_narrowing/clean",
+      "language": "java",
+      "tags": [
+        "kotlin",
+        "type-narrowing",
+        "clean"
+      ],
+      "args": [
+        "--only=java"
+      ],
+      "expect": {
+        "exit_code": "zero",
+        "totals": {
+          "warning": {
+            "max": 0
           }
         }
       }

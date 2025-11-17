@@ -81,7 +81,7 @@ ONLY_CATEGORIES=""
 DETAIL_LIMIT_OVERRIDE=""
 CI_MODE=0
 FAIL_ON_WARNING=0
-INCLUDE_EXT="java"
+INCLUDE_EXT="java,kt,kts"
 QUIET=0
 NO_COLOR_FLAG=0
 EXTRA_EXCLUDES=""
@@ -196,6 +196,7 @@ CRITICAL_COUNT=0
 WARNING_COUNT=0
 INFO_COUNT=0
 TOTAL_FILES=0
+HAS_KOTLIN_FILES=0
 
 # ────────────────────────────────────────────────────────────────────────────
 # Global state
@@ -399,10 +400,13 @@ from pathlib import Path
 root = Path(sys.argv[1]).resolve()
 mode = sys.argv[2]
 base = root if root.is_dir() else root.parent
+exts = ('.java', '.kt')
 if root.is_file():
-    candidates = [root] if root.suffix.lower() == '.java' else []
+    candidates = [root] if root.suffix.lower() in exts else []
 else:
-    candidates = [p for p in base.rglob('*.java')]
+    candidates = []
+    for ext in exts:
+        candidates.extend(base.rglob(f'*{ext}'))
 
 def relpath(path):
     try:
@@ -484,6 +488,52 @@ else:
 print(count)
 print(",".join(samples))
 PY
+}
+
+run_kotlin_type_narrowing_checks() {
+  if [[ "$HAS_KOTLIN_FILES" -ne 1 ]]; then
+    return 0
+  fi
+  if [[ "${UBS_SKIP_TYPE_NARROWING:-0}" -eq 1 ]]; then
+    print_finding "info" 0 "Kotlin type narrowing checks skipped" "Set UBS_SKIP_TYPE_NARROWING=0 or remove --skip-type-narrowing to re-enable"
+    return 0
+  fi
+  local script_dir helper
+  script_dir="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  helper="$script_dir/helpers/type_narrowing_kotlin.py"
+  if [[ ! -f "$helper" ]]; then
+    print_finding "info" 0 "Kotlin type narrowing helper missing" "$helper not found"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    print_finding "info" 0 "python3 unavailable for Kotlin helper" "Install python3 to enable Kotlin guard analysis"
+    return 0
+  fi
+  local output status
+  output="$(python3 "$helper" "$PROJECT_DIR" 2>&1)"
+  status=$?
+  if [[ $status -ne 0 ]]; then
+    print_finding "info" 0 "Kotlin type narrowing helper failed" "$output"
+    return 0
+  fi
+  if [[ -z "$output" ]]; then
+    print_finding "good" "No Kotlin guard clauses missing exits"
+    return 0
+  fi
+  local count=0
+  local previews=()
+  while IFS=$'\t' read -r location message; do
+    [[ -z "$location" ]] && continue
+    count=$((count + 1))
+    if [[ ${#previews[@]} -lt 3 ]]; then
+      previews+=("$location → $message")
+    fi
+  done <<< "$output"
+  local desc="Examples: ${previews[*]}"
+  if [[ $count -gt ${#previews[@]} ]]; then
+    desc+=" (and $((count - ${#previews[@]})) more)"
+  fi
+  print_finding "warning" "$count" "Kotlin guard without exit before '!!'" "$desc"
 }
 
 run_async_error_checks() {
@@ -1129,6 +1179,14 @@ TOTAL_FILES=$(
 )
 say "${WHITE}Files:${RESET}    ${CYAN}$TOTAL_FILES source files (${INCLUDE_EXT})${RESET}"
 
+if ( set +o pipefail;
+     find "$PROJECT_DIR" \
+       \( -type d \( "${EX_PRUNE[@]}" \) -prune \) -o \
+       \( -type f \( -name '*.kt' -o -name '*.kts' \) -print -quit \) 2>/dev/null
+   ) | grep -q .; then
+  HAS_KOTLIN_FILES=1
+fi
+
 # Tool detection
 echo ""
 if check_ast_grep; then
@@ -1183,6 +1241,11 @@ if [ "$isp_get_ast" -gt 0 ]; then print_finding "info" "$isp_get_ast" "isPresent
 print_subheader "Null checks using '==' with Strings (prefer Objects.equals)"
 str_eq_null=$("${GREP_RN[@]}" -e "==[[:space:]]*null|null[[:space:]]*==" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
 if [ "$str_eq_null" -gt 0 ]; then print_finding "info" "$str_eq_null" "Null equality checks present - consider Objects.isNull/nonNull where expressive"; fi
+
+if [[ "$HAS_KOTLIN_FILES" -eq 1 ]]; then
+  print_subheader "Kotlin guard clauses without exit"
+  run_kotlin_type_narrowing_checks
+fi
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1215,7 +1278,7 @@ while IFS= read -r f; do
     print_finding "warning" 1 "equals without hashCode in $f" "Objects used in HashMap/Set will misbehave"
     print_code_sample "$f" "$(grep -nE 'boolean[[:space:]]+equals\s*\(' "$f" | head -n1 | cut -d: -f1)" "equals(...) missing hashCode()"
   fi
-done < <(find "$PROJECT_DIR" -type f \( -name "*.java" \) -print 2>/dev/null)
+done < <(find "$PROJECT_DIR" -type f \( -name "*.java" -o -name "*.kt" \) -print 2>/dev/null)
 
 print_subheader "Boxed primitives compared with '==' (heuristic)"
 boxed_eq=$("${GREP_RN[@]}" -e "\b(Integer|Long|Short|Byte|Boolean|Double|Float)\b[^;\n]*==[^;\n]*" "$PROJECT_DIR" 2>/dev/null | count_lines || true)

@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Detect Kotlin null guards that do not exit before using the guarded value with `!!`."""
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+SKIP_DIRS = {".git", "build", "out", "dist", "target", ".gradle", ".idea", "node_modules"}
+GUARD_PATTERN = re.compile(r"if\s*\(\s*([A-Za-z_][\w]*)\s*(?:==|===)\s*null\s*\)", re.MULTILINE)
+DOUBLE_BANG_PATTERN = "{name}\\s*!!"
+ASSIGN_PATTERN = re.compile(r"{name}\s*=")
+EXIT_PATTERN = re.compile(r"\b(return|throw|continue|break)\b")
+
+
+def iter_kotlin_files(root: Path):
+    if root.is_file():
+        if root.suffix.lower() in {".kt", ".kts"} and not any(part in SKIP_DIRS for part in root.parts):
+            yield root
+        return
+
+    for path in root.rglob("*.kt"):
+        if any(part in SKIP_DIRS for part in path.parts):
+            continue
+        if path.is_file():
+            yield path
+
+
+def find_block_end(text: str, brace_start: int) -> int:
+    depth = 0
+    for idx in range(brace_start, len(text)):
+        ch = text[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return idx
+    return len(text) - 1
+
+
+def first_non_space(text: str, idx: int) -> int:
+    while idx < len(text) and text[idx].isspace():
+        idx += 1
+    return idx
+
+
+def extract_guard_region(text: str, match_end: int) -> tuple[str, int]:
+    """Return guard body text and index immediately following the guard."""
+    idx = first_non_space(text, match_end)
+    if idx < len(text) and text[idx] == "{":
+        block_end = find_block_end(text, idx)
+        return text[idx : block_end + 1], block_end + 1
+
+    newline = text.find("\n", idx)
+    if newline == -1:
+        newline = len(text)
+    return text[idx:newline], newline
+
+
+def contains_exit(block_text: str) -> bool:
+    return bool(EXIT_PATTERN.search(block_text))
+
+
+def line_col(text: str, pos: int) -> tuple[int, int]:
+    line = text.count("\n", 0, pos) + 1
+    last_newline = text.rfind("\n", 0, pos)
+    if last_newline == -1:
+        col = pos + 1
+    else:
+        col = pos - last_newline
+    return line, col
+
+
+def analyze_file(path: Path):
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    issues = []
+    for match in GUARD_PATTERN.finditer(text):
+        var_name = match.group(1)
+        block_text, guard_end = extract_guard_region(text, match.end())
+        if contains_exit(block_text):
+            continue
+        assign_regex = re.compile(ASSIGN_PATTERN.pattern.format(name=re.escape(var_name)))
+        double_regex = re.compile(DOUBLE_BANG_PATTERN.format(name=re.escape(var_name)))
+        search_pos = guard_end
+        while True:
+            double_match = double_regex.search(text, search_pos)
+            if not double_match:
+                break
+            assign_match = assign_regex.search(text, search_pos, double_match.start())
+            if assign_match:
+                # Variable reassigned before "!!"; treat as safe.
+                break
+            absolute_pos = double_match.start()
+            line, col = line_col(text, absolute_pos)
+            message = f"{var_name}!! after non-exiting null guard"
+            issues.append((line, col, message))
+            search_pos = double_match.end()
+            break  # only flag first occurrence
+    return issues
+
+
+def main() -> int:
+    if len(sys.argv) < 2:
+        print("Usage: type_narrowing_kotlin.py <project_dir>", file=sys.stderr)
+        return 1
+    root = Path(sys.argv[1]).resolve()
+    if not root.exists():
+        return 0
+    any_output = False
+    for path in iter_kotlin_files(root):
+        try:
+            issues = analyze_file(path)
+        except OSError:
+            continue
+        for line, col, message in issues:
+            any_output = True
+            print(f"{path}:{line}:{col}\t{message}")
+    return 0 if any_output or root.is_dir() else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -240,6 +240,46 @@ emit_findings_json() {
   } > "$out"
 }
 
+run_rust_type_narrowing_checks() {
+  local helper="$SCRIPT_DIR/helpers/type_narrowing_rust.py"
+  if [[ ! -f "$helper" ]]; then
+    return
+  fi
+  if [[ "${UBS_SKIP_TYPE_NARROWING:-0}" -eq 1 ]]; then
+    print_finding "info" 0 "Rust type narrowing heuristics skipped" "Set UBS_SKIP_TYPE_NARROWING=0 or remove --skip-type-narrowing to re-enable"
+    return
+  fi
+  local output status ast_bin=""
+  if [[ "$HAS_AST_GREP" -eq 1 ]]; then
+    ast_bin="${AST_GREP_CMD[*]}"
+  fi
+  output="$(AST_GREP_BIN="$ast_bin" python3 "$helper" "$PROJECT_DIR" 2>&1)"
+  status=$?
+  if [[ $status -ne 0 ]]; then
+    print_finding "info" 0 "Rust type narrowing helper failed" "$output"
+    return
+  fi
+  if [[ -z "$output" ]]; then
+    print_finding "good" "No guard/unwrap mismatches detected"
+    return
+  fi
+  local count=0
+  local previews=()
+  while IFS=$'\t' read -r location message; do
+    [[ -z "$location" ]] && continue
+    count=$((count + 1))
+    if [[ ${#previews[@]} -lt 3 ]]; then
+      previews+=("$location → $message")
+    fi
+  done <<< "$output"
+  local desc="Examples: ${previews[*]}"
+  if [[ $count -gt ${#previews[@]} ]]; then
+    desc+=" (and $((count - ${#previews[@]})) more)"
+  fi
+  print_finding "warning" "$count" "Guarded Option/Result later unwrap" "$desc"
+  add_finding "warning" "$count" "Guarded Option/Result later unwrap" "$desc" "${CATEGORY_NAME[1]}"
+}
+
 # Async error coverage metadata
 ASYNC_ERROR_RULE_IDS=(rust.async.tokio-task-no-await)
 declare -A ASYNC_ERROR_SUMMARY=(
@@ -1311,6 +1351,9 @@ epln_count=$(( $(ast_search 'eprintln!($$)' || echo 0) + $("${GREP_RN[@]}" -e "e
 if [ "$dbg_count" -gt 0 ]; then print_finding "info" "$dbg_count" "dbg! macros present"; add_finding "info" "$dbg_count" "dbg! macros present" "" "${CATEGORY_NAME[1]}" "$(collect_samples_rg "dbg!\(" 3)"; fi
 if [ "$pln_count" -gt 0 ]; then print_finding "info" "$pln_count" "println! found - prefer logging"; add_finding "info" "$pln_count" "println! found - prefer logging" "" "${CATEGORY_NAME[1]}" "$(collect_samples_rg "println!\(" 3)"; fi
 if [ "$epln_count" -gt 0 ]; then print_finding "info" "$epln_count" "eprintln! found - prefer logging"; add_finding "info" "$epln_count" "eprintln! found - prefer logging" "" "${CATEGORY_NAME[1]}" "$(collect_samples_rg "eprintln!\(" 3)"; fi
+
+print_subheader "Guard clauses that still unwrap later"
+run_rust_type_narrowing_checks
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════

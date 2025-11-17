@@ -53,10 +53,11 @@ test-suite/
 │   ├── timezone-date-bugs.js          # Dates, timezones, DST, leap years
 │   └── floating-point-bugs.js         # Precision, money, rounding
 │
+├── js/type_narrowing/          # TS guard fixtures (buggy + clean)
 ├── python/                     # Python fixtures + manifest cases
 ├── golang/                     # Go fixtures + manifest cases
 ├── cpp/                        # C/C++ fixtures + manifest cases
-├── rust/                       # Rust fixtures + manifest cases
+├── rust/                       # Rust fixtures + manifest cases (includes type narrowing demo)
 ├── java/                       # Java fixtures + manifest cases
 ├── ruby/                       # Ruby fixtures + manifest cases
 └── README.md                   # This file
@@ -76,11 +77,11 @@ This keeps the JS module maintainable and ensures future contributors extend str
 
 | Language | Buggy path | Clean path | Highlights |
 |----------|------------|------------|------------|
-| JavaScript/TypeScript | `test-suite/buggy/`, `test-suite/js/buggy/` | `test-suite/clean/`, `test-suite/js/clean/` | 20 core files + framework + realistic + edge-case coverage |
+| JavaScript/TypeScript | `test-suite/buggy/`, `test-suite/js/buggy/`, `test-suite/js/type_narrowing/` | `test-suite/clean/`, `test-suite/js/clean/`, `test-suite/js/type_narrowing/clean/` | 20 core files + framework + realistic + edge cases plus dedicated type-narrowing fixtures |
 | Python | `test-suite/python/buggy/` | `test-suite/python/clean/` | Async/security/resource fixtures + mutable defaults, shell injection |
 | Go | `test-suite/golang/buggy/` | `test-suite/golang/clean/` | Concurrency, HTTP safety, context leaks, ticker/perf issues |
 | C/C++ | `test-suite/cpp/buggy/` | `test-suite/cpp/clean/` | RAII vs leaks, unsafe `strcpy`, overflow/memory hygiene |
-| Rust | `test-suite/rust/buggy/` | `test-suite/rust/clean/` | `unwrap()` panics, async tasks, command injection, float precision |
+| Rust | `test-suite/rust/buggy/` | `test-suite/rust/clean/` | `unwrap()` panics, async tasks, command injection, float precision, type-narrowing demo |
 | Java | `test-suite/java/buggy/` | `test-suite/java/clean/` | Executor leaks, blocking I/O, SQL and command injection |
 | Ruby | `test-suite/ruby/buggy/` | `test-suite/ruby/clean/` | eval/YAML problems, thread leaks, file cleanup |
 
@@ -205,6 +206,12 @@ Each file contains **intentional bugs** that the scanner should detect:
 | `python-taint-clean` | `test-suite/python/clean/taint_analysis.py` | Same flows but escaped via `html.escape`, parameterized SQL, and `shlex.quote`, proving the helper stays quiet on safe code. |
 | `golang-taint-buggy` | `test-suite/golang/buggy/taint_analysis.go` | `r.FormValue` is written to `fmt.Fprintf`, concatenated into SQL, and passed to `exec.Command("sh","-c", ...)`. |
 | `golang-taint-clean` | `test-suite/golang/clean/taint_analysis.go` | Escapes comments with `html.EscapeString`, uses positional args in `db.Exec`, and passes cleaned paths into `exec.Command`. |
+| `js-type-narrowing-buggy` | `test-suite/js/type_narrowing/buggy` | TypeScript fixtures that guard values (e.g., `if (!user) { ... }`) but keep running and later dereference/force unwrap, exercising the tsserver-powered narrowing analyzer. |
+| `js-type-narrowing-clean` | `test-suite/js/type_narrowing/clean` | Guard clauses that exit early (return/throw) so the analyzer proves it suppresses safe code. |
+| `rust-type-narrowing-buggy` | `test-suite/rust/buggy/type_narrowing.rs` | Rust fixtures where `if let Some/Ok` guards continue execution and later call `.unwrap()`/`.expect()` on the guarded value, feeding the cross-language narrowing heuristics. |
+| `rust-type-narrowing-clean` | `test-suite/rust/clean/type_narrowing.rs` | Counterexamples that exit early or propagate via `?`, ensuring the heuristic does not report on safe code paths. |
+| `kotlin-type-narrowing-buggy` | `test-suite/kotlin/type_narrowing/buggy` | Kotlin guards that log/continue instead of exiting, then dereference the nullable value with `!!`, ensuring the JVM module spots unsafe usage outside the guard. |
+| `kotlin-type-narrowing-clean` | `test-suite/kotlin/type_narrowing/clean` | Kotlin fixtures that return/throw or use Elvis early so the analyzer proves it suppresses safe flows. |
 
 ### Realistic Scenarios
 
@@ -242,10 +249,10 @@ Each file contains **intentional bugs** that the scanner should detect:
 
 ### 📈 Overall Test Suite Summary
 
-- **Total Buggy Files:** 29 files
-- **Total Expected Bugs:** 460+ issues across all categories
-- **Total Clean Files:** 10 files
-- **Coverage:** Security, Performance, Concurrency, Edge Cases, Framework Patterns
+- **Total Buggy Files:** 32+ files
+- **Total Expected Bugs:** 475+ issues across all categories
+- **Total Clean Files:** 13 files
+- **Coverage:** Security, Performance, Concurrency, Edge Cases, Framework Patterns, Type Narrowing
 
 ## 🎯 What Each File Tests
 

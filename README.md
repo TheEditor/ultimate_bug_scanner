@@ -384,6 +384,14 @@ ubs .
 - Humans don't want to maintain 7 different config files
 - CI/CD pipelines want one command, one exit code
 
+### **Type Narrowing Coverage Across Languages**
+
+- **TypeScript** – UBS shells out to `tsserver` (via the bundled helper) whenever Node.js + the `typescript` package are available. The installer now surfaces a “Type narrowing readiness” diagnostic so you immediately know if tsserver-powered guards are running.
+- **Rust** – A Python helper inspects `if let Some/Ok` guard clauses and flags subsequent `.unwrap()`/`.expect()` calls outside of exiting blocks. Fixtures and manifest cases keep this regression-tested.
+- **Kotlin** – The Java module scans `.kt` sources for `if (value == null)` guards that merely log and keep running before hitting `value!!`, catching the same pitfall on JVM teams that mix Java + Kotlin.
+
+Use `--skip-type-narrowing` (or `UBS_SKIP_TYPE_NARROWING=1`) when you want to bypass all of these guard analyzers—for example on air-gapped CI environments or when validating legacy projects one language at a time.
+
 ### **4. Speed Enables Tight Iteration Loops**
 
 The **generate → scan → fix** cycle needs to be **fast** for AI workflows:
@@ -959,6 +967,7 @@ The installer will:
 - ✅ Optionally install `ripgrep` (for 10x faster scanning)
 - ✅ Optionally install `jq` (needed for JSON/SARIF merging across all language scanners)
 - ✅ Optionally install `typos` (smart spellchecker for docs and identifiers)
+- ✅ Optionally install `Node.js + typescript` (enables deep TypeScript type narrowing analysis)
 - ✅ Set up git hooks (block commits with critical bugs)
 - ✅ Set up Claude Code hooks (scan on file save)
 - ✅ Add documentation to your AGENTS.md
@@ -988,6 +997,7 @@ ubs --help
 npm install -g @ast-grep/cli     # AST-based analysis
 brew install ripgrep             # 10x faster searching (or: apt/dnf/cargo install)
 brew install typos-cli           # Spellchecker tuned for code (or: cargo install typos-cli)
+npm install -g typescript        # Enables full tsserver-based type narrowing checks
 ```
 
 ### **Option 3: Use Without Installing**
@@ -1007,10 +1017,14 @@ curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scan
 |------|--------------|----------------|
 | `--dry-run` | Prints every install action (downloads, PATH edits, hook writes, cleanup) without touching disk. Dry runs still resolve config, detect agents, and show you exactly what *would* change. | Audit the installer, demo it to teammates, or validate CI steps without modifying a workstation. |
 | `--self-test` | Immediately runs `test-suite/install/run_tests.sh` after installation and exits non-zero if the smoke suite fails. | CI/CD jobs and verified setups can prove the installer still works end-to-end before trusting a release. |
+| `--skip-type-narrowing` | Skip the Node.js + TypeScript readiness probe during install/diagnose runs. | Useful for air-gapped hosts or environments that don't want tsserver hints. |
+| `--skip-typos` | Skip the Typos spellchecker installation + diagnostics. | Handy when corp images already provide Typos or when you deliberately disable spellcheck automation. |
 
 > ⚠️ `--self-test` requires running `install.sh` from a working tree that contains `test-suite/install/run_tests.sh` (i.e., the repo root). Curl-piping the installer from GitHub can’t self-test because the harness isn’t present, so the flag will error out early instead of giving a false sense of safety.
 
 > ℹ️ After every install the script now double-checks `command -v ubs`. If another copy shadows the freshly written binary, you’ll get an explicit warning with both paths so you can fix PATH order before running scans.
+
+> 🧠 Type narrowing relies on Node.js plus the `typescript` npm package. The installer now checks for both, can optionally run `npm install -g typescript`, and surfaces readiness inside `install.sh --diagnose`. Use `--skip-type-narrowing` if you’re on an air-gapped host or plan to keep the heuristic-only mode.
 
 **Common combos**
 
@@ -1353,6 +1367,7 @@ Performance:
 Rule Control:
   --skip=CSV               Skip categories by number (see output for numbers)
                            Example: --skip=11,14  # Skip debug code + TODOs
+  --skip-type-narrowing    Disable tsserver-based guard analysis (falls back to text heuristics)
   --rules=DIR              Additional ast-grep rules directory
                            Rules are merged with built-in rules
 

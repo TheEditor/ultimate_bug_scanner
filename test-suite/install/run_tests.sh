@@ -6,6 +6,7 @@ INSTALLER="$ROOT_DIR/install.sh"
 
 tests_failed=0
 tmpdirs=()
+SELF_TEST_MODE="${UBS_INSTALLER_SELF_TEST:-0}"
 
 cleanup() {
   for dir in "${tmpdirs[@]:-}"; do
@@ -22,6 +23,8 @@ run_installer() {
   local bin_dir="$home_dir/.local/bin"
   mkdir -p "$bin_dir"
 
+  rm -rf /tmp/ubs-install.lock 2>/dev/null || true
+
   if ! HOME="$home_dir" PATH="$bin_dir:$PATH" SHELL=/bin/bash \
       "$INSTALLER" \
         --non-interactive \
@@ -33,7 +36,8 @@ run_installer() {
         --no-path-modify \
         --install-dir "$bin_dir" \
         "$@" >"$log_file" 2>&1; then
-    echo "[FAIL] Installer exited with status $? (log: $log_file)"
+    local status=$?
+    echo "[FAIL] Installer exited with status $status (log: $log_file)"
     tail -n 80 "$log_file"
     tests_failed=1
     return 1
@@ -47,6 +51,13 @@ run_installer() {
 
   if [ ! -x "$bin_dir/ubs" ]; then
     echo "[FAIL] ubs binary not installed at $bin_dir/ubs"
+    tests_failed=1
+    return 1
+  fi
+
+  if [ -e /tmp/ubs-install.lock ]; then
+    echo "[FAIL] lock file /tmp/ubs-install.lock left behind (log: $log_file)"
+    rm -rf /tmp/ubs-install.lock 2>/dev/null || true
     tests_failed=1
     return 1
   fi
@@ -115,9 +126,25 @@ test_skip_typos_flag() {
   fi
 }
 
+test_self_test_flag() {
+  echo "[TEST] self_test_flag"
+  local ctx
+  ctx="$(mktemp -d)"
+  tmpdirs+=("$ctx")
+  local home="$ctx/home"
+  local log="$ctx/install.log"
+
+  if run_installer "$home" "$log" --skip-typos --self-test; then
+    echo "[PASS] self_test_flag"
+  fi
+}
+
 test_basic_smoke
 test_no_alias_written_when_no_path_modify
 test_skip_typos_flag
+if [ "$SELF_TEST_MODE" -ne 1 ]; then
+  test_self_test_flag
+fi
 
 if [ "$tests_failed" -ne 0 ]; then
   echo ""

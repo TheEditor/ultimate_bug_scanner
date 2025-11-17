@@ -49,6 +49,9 @@ SKIP_AST_GREP=0
 SKIP_RIPGREP=0
 SKIP_JQ=0
 SKIP_TYPOS=0
+SKIP_TYPE_NARROWING=0
+SKIP_TYPE_NARROWING=0
+TYPE_NARROWING_READY=0
 SKIP_HOOKS=0
 INSTALL_DIR=""
 FORCE_REINSTALL=0
@@ -94,32 +97,64 @@ show_help() {
   cat <<'HELP'
 Usage: install.sh [OPTIONS]
 
-Options:
 HELP
+  echo "Core workflow:"
   print_help_option "--easy-mode" "Accept all prompts, install deps, and wire integrations"
   print_help_option "--non-interactive" "Skip all prompts (use defaults)"
   print_help_option "--update" "Force reinstall to latest version"
-  print_help_option "--dry-run" "Log every action without modifying the system"
-  print_help_option "--self-test" "Run installer smoke tests after install"
   print_help_option "--install-dir DIR" "Custom installation directory"
   print_help_option "--system" "Install to /usr/local/bin (uses sudo if needed)"
   print_help_option "--no-path-modify" "Skip shell RC edits and alias creation"
+  echo ""
+  echo "Safety & diagnostics:"
+  print_help_option "--dry-run" "Log every action without modifying the system"
+  print_help_option "--self-test" "Run installer smoke tests after install"
+  print_help_option "--skip-version-check" "Do not check GitHub for newer releases"
+  print_help_option "--skip-verification" "Skip post-install verification banner"
+  print_help_option "--diagnose" "Print environment + dependency diagnostics"
+  print_help_option "--generate-config" "Create ~/.config/ubs/install.conf"
+  echo ""
+  echo "Dependency controls:"
   print_help_option "--skip-ast-grep" "Skip ast-grep installation"
   print_help_option "--skip-ripgrep" "Skip ripgrep installation"
   print_help_option "--skip-jq" "Skip jq installation"
   print_help_option "--skip-typos" "Skip typos installation"
+  print_help_option "--skip-type-narrowing" "Skip Node/TypeScript readiness probe"
+  echo ""
+  echo "Integrations:"
   print_help_option "--skip-hooks" "Skip hook/setup prompts"
-  print_help_option "--skip-version-check" "Do not check GitHub for newer releases"
-  print_help_option "--skip-verification" "Skip post-install verification banner"
-  print_help_option "--quiet" "Reduce installer output"
-  print_help_option "--no-color" "Disable ANSI colors"
   print_help_option "--setup-git-hook" "Only (re)install git hook"
   print_help_option "--setup-claude-hook" "Only install Claude on-save hook"
-  print_help_option "--generate-config" "Create ~/.config/ubs/install.conf"
-  print_help_option "--diagnose" "Print environment + dependency diagnostics"
+  echo ""
+  echo "Output & UX:"
+  print_help_option "--quiet" "Reduce installer output"
+  print_help_option "--no-color" "Disable ANSI colors"
   print_help_option "--uninstall" "Remove UBS and integrations"
   print_help_option "--help" "Show this help"
   echo ""
+}
+
+report_type_narrowing_status() {
+  TYPE_NARROWING_READY=0
+  if [ "$SKIP_TYPE_NARROWING" -eq 1 ]; then
+    log "[skip] Type narrowing readiness check disabled via --skip-type-narrowing"
+    return 0
+  fi
+  if dry_run_enabled; then
+    log_dry_run "Would check Node.js + TypeScript readiness for type narrowing."
+    return 0
+  fi
+  if ! check_node; then
+    warn "   Node.js not found – TypeScript-based narrowing will fall back to heuristic mode"
+    return 0
+  fi
+  if check_typescript_pkg; then
+    success "   TypeScript compiler detected (type narrowing ready)"
+    TYPE_NARROWING_READY=1
+  else
+    warn "   TypeScript package not found – run 'npm install -g typescript' or add it to your project devDependencies"
+  fi
+  return 0
 }
 
 register_temp_path() {
@@ -839,8 +874,20 @@ verify_installation() {
 
   if check_typos; then
     success "   typos: $(command -v typos)"
+  elif [ "$SKIP_TYPOS" -eq 1 ]; then
+    log "   typos: skipped via --skip-typos"
   else
     warn "   typos: not available (spellcheck automation disabled)"
+  fi
+
+  if [ "$SKIP_TYPE_NARROWING" -eq 1 ]; then
+    log "   Type narrowing: skipped via --skip-type-narrowing"
+  elif ! check_node; then
+    warn "   Type narrowing: Node.js missing (install Node.js from https://nodejs.org for tsserver checks)"
+  elif check_typescript_pkg; then
+    success "   Type narrowing: TypeScript package detected"
+  else
+    warn "   Type narrowing: TypeScript package missing (run 'npm install -g typescript' or add devDependency)"
   fi
 
   # Test 4: Quick smoke test
@@ -927,7 +974,8 @@ run_self_tests_if_requested() {
   fi
 
   log_section "Installer Self-Test"
-  if bash "$test_script"; then
+  release_lock
+  if UBS_INSTALLER_SELF_TEST=1 bash "$test_script"; then
     success "Installer self-test suite passed"
     echo ""
     return 0
@@ -999,8 +1047,14 @@ read_config_file() {
       skip_jq)
         SKIP_JQ="$(normalize_bool "$value")"
         ;;
+      skip_type_narrowing)
+        SKIP_TYPE_NARROWING="$(normalize_bool "$value")"
+        ;;
       skip_typos)
         SKIP_TYPOS="$(normalize_bool "$value")"
+        ;;
+      skip_type_narrowing)
+        SKIP_TYPE_NARROWING="$(normalize_bool "$value")"
         ;;
       skip_hooks)
         SKIP_HOOKS="$(normalize_bool "$value")"
@@ -1065,6 +1119,8 @@ skip_ast_grep=0
 skip_ripgrep=0
 skip_jq=0
 skip_typos=0
+skip_type_narrowing=0
+skip_type_narrowing=0
 
 # Skip version checking on install
 skip_version_check=0
@@ -1263,6 +1319,10 @@ diagnostic_check() {
   else
     log "  No config file (run with --generate-config to create)"
   fi
+  echo ""
+
+  echo -e "${BOLD}Type narrowing readiness:${RESET}"
+  report_type_narrowing_status
   echo ""
 
   echo ""
@@ -1641,6 +1701,39 @@ install_ripgrep() {
       ;;
   esac
 
+}
+
+check_node() {
+  command -v node >/dev/null 2>&1
+}
+
+check_typescript_pkg() {
+  if ! check_node; then
+    return 1
+  fi
+  node -e "require('typescript')" >/dev/null 2>&1
+}
+
+install_typescript() {
+  if dry_run_enabled; then
+    log_dry_run "Would install TypeScript globally via npm."
+    return 0
+  fi
+  if ! check_node; then
+    error "Node.js not detected; install Node.js first."
+    return 1
+  fi
+  if ! command -v npm >/dev/null 2>&1; then
+    error "npm not found; install Node.js/npm to add TypeScript."
+    return 1
+  fi
+  log "Installing TypeScript (npm install -g typescript)..."
+  if npm install -g typescript 2>&1 | tee "$(mktemp_in_workdir "ts-install.log.XXXXXX")"; then
+    success "TypeScript installed globally"
+    return 0
+  fi
+  error "TypeScript installation via npm failed"
+  return 1
 }
 
 install_typos() {
@@ -2441,8 +2534,16 @@ shift
 SKIP_JQ=1
 shift
 ;;
+--skip-type-narrowing)
+SKIP_TYPE_NARROWING=1
+shift
+;;
 --skip-typos)
 SKIP_TYPOS=1
+shift
+;;
+--skip-type-narrowing)
+SKIP_TYPE_NARROWING=1
 shift
 ;;
 --skip-hooks)
@@ -2557,16 +2658,36 @@ echo ""
 fi
 
 # Check for typos
-if ! check_typos && [ "$SKIP_TYPOS" -eq 0 ]; then
-warn "typos not found (smart spellchecker for docs/code)"
-if ask "Install typos now?"; then
-install_typos || warn "Continuing without typos (spellcheck automation disabled)"
-fi
-echo ""
+if [ "$SKIP_TYPOS" -eq 1 ]; then
+  log "[skip] typos installation disabled via --skip-typos"
+elif ! check_typos; then
+  warn "typos not found (smart spellchecker for docs/code)"
+  if ask "Install typos now?"; then
+    install_typos || warn "Continuing without typos (spellcheck automation disabled)"
+  fi
 else
-success "typos is installed"
-echo ""
+  success "typos is installed"
 fi
+echo ""
+
+# Type narrowing readiness (Node + TypeScript)
+if [ "$SKIP_TYPE_NARROWING" -eq 1 ]; then
+  log "[skip] Type narrowing dependencies skipped via --skip-type-narrowing"
+else
+  if ! check_node; then
+    warn "Node.js not found – type narrowing uses text heuristics only. Install Node.js from https://nodejs.org or your package manager (npm included) for richer analysis."
+  else
+    if check_typescript_pkg; then
+      success "TypeScript package detected (type narrowing ready)"
+    else
+      warn "TypeScript package not found – run 'npm install -g typescript' or add it to devDependencies."
+      if command -v npm >/dev/null 2>&1 && ask "Install TypeScript globally via npm now?"; then
+        install_typescript || warn "Continuing without TypeScript (type narrowing fallback mode only)"
+      fi
+    fi
+  fi
+fi
+echo ""
 
 # Install the scanner
 
@@ -2623,6 +2744,8 @@ if ! run_self_tests_if_requested; then
   error "Self-test suite failed"
   exit 1
 fi
+
+warn_if_stale_binary
 
 echo ""
 echo -e "${BOLD}${GREEN}"

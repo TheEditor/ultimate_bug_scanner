@@ -47,6 +47,7 @@ MODULE_DIR_DEFAULT="${XDG_DATA_HOME:-$HOME/.local/share}/ubs/modules"
 MODULE_DIR="$MODULE_DIR_DEFAULT"
 UPDATE_MODULES=0
 JOBS="${JOBS:-0}"
+SKIP_TYPE_NARROWING=0
 
 usage() {
   cat <<USAGE >&2
@@ -63,6 +64,7 @@ Options:
   --update-modules        Force re-download of modules before run
   --jobs=N                Parallelism hint (passed to children if supported)
   --ignore-file=PATH      Read additional ignore globs (default: PROJECT/.ubsignore if present)
+  --skip-type-narrowing   Skip JS/Rust type narrowing checks (falls back to basic heuristics)
   -h, --help              Show this help
 
 Examples:
@@ -84,6 +86,7 @@ while [[ $# -gt 0 ]]; do
     --module-dir=*) MODULE_DIR="${1#*=}"; shift;;
     --update-modules) UPDATE_MODULES=1; shift;;
     --jobs=*) JOBS="${1#*=}"; shift;;
+    --skip-type-narrowing) SKIP_TYPE_NARROWING=1; shift;;
     -h|--help) usage; exit 0;;
     *)
       if [[ "$PROJECT_DIR" == "." ]]; then PROJECT_DIR="$1"; else usage; exit 2; fi
@@ -271,10 +274,10 @@ detect_lang(){
     java)
       if need_cmd rg; then
         rg -q --hidden -g '!target/**' -g '!build/**' -g '!out/**' -g '!dist/**' \
-           -g '*.java' -g 'pom.xml' -g 'build.gradle' -g 'build.gradle.kts' -g 'settings.gradle' -g 'settings.gradle.kts' -g 'gradlew' -g 'mvnw' . "$PROJECT_DIR" 2>/dev/null && found=0
+           -g '*.java' -g '*.kt' -g 'pom.xml' -g 'build.gradle' -g 'build.gradle.kts' -g 'settings.gradle' -g 'settings.gradle.kts' -g 'gradlew' -g 'mvnw' . "$PROJECT_DIR" 2>/dev/null && found=0
       else
         find "$PROJECT_DIR" \( -name target -o -name build -o -name out -o -name dist -o -name .git \) -prune -o \
-          -type f \( -name '*.java' -o -name 'pom.xml' -o -name 'build.gradle' -o -name 'build.gradle.kts' -o -name 'settings.gradle' -o -name 'settings.gradle.kts' -o -name 'gradlew' -o -name 'mvnw' \) -print -quit 2>/dev/null | grep -q . && found=0
+          -type f \( -name '*.java' -o -name '*.kt' -o -name 'pom.xml' -o -name 'build.gradle' -o -name 'build.gradle.kts' -o -name 'settings.gradle' -o -name 'settings.gradle.kts' -o -name 'gradlew' -o -name 'mvnw' \) -print -quit 2>/dev/null | grep -q . && found=0
       fi
       ;;
     ruby)
@@ -392,7 +395,7 @@ run_lang(){
   case "$fmt" in
     json)
       prepare_metrics_dir "$metrics_dir"
-      if UBS_METRICS_DIR="$metrics_dir" UBS_LANG="$lang" "$module" "${args[@]}" --format=json >"$out_json" 2>"$err"; then
+      if UBS_METRICS_DIR="$metrics_dir" UBS_LANG="$lang" UBS_SKIP_TYPE_NARROWING="$SKIP_TYPE_NARROWING" "$module" "${args[@]}" --format=json >"$out_json" 2>"$err"; then
         module_status=$?
         restore_original_paths "$out_json"
         if need_cmd jq && jq -e . "$out_json" >/dev/null 2>&1; then
@@ -405,7 +408,7 @@ run_lang(){
         module_status=$?
       fi
       prepare_metrics_dir "$metrics_dir"
-      if ! UBS_METRICS_DIR="$metrics_dir" UBS_LANG="$lang" "$module" "${args[@]}" >"$out_txt" 2>>"$err"; then
+      if ! UBS_METRICS_DIR="$metrics_dir" UBS_LANG="$lang" UBS_SKIP_TYPE_NARROWING="$SKIP_TYPE_NARROWING" "$module" "${args[@]}" >"$out_txt" 2>>"$err"; then
         module_status=$?
       fi
       restore_original_paths "$out_txt"
@@ -414,7 +417,7 @@ run_lang(){
       ;;
     sarif)
       prepare_metrics_dir "$metrics_dir"
-      if UBS_METRICS_DIR="$metrics_dir" UBS_LANG="$lang" "$module" "${args[@]}" --format=sarif >"$out_sarif" 2>"$err"; then
+      if UBS_METRICS_DIR="$metrics_dir" UBS_LANG="$lang" UBS_SKIP_TYPE_NARROWING="$SKIP_TYPE_NARROWING" "$module" "${args[@]}" --format=sarif >"$out_sarif" 2>"$err"; then
         module_status=$?
         restore_original_paths "$out_sarif"
         if need_cmd jq && jq -e . "$out_sarif" >/dev/null 2>&1; then
@@ -426,7 +429,7 @@ run_lang(){
         module_status=$?
       fi
       prepare_metrics_dir "$metrics_dir"
-      if ! UBS_METRICS_DIR="$metrics_dir" UBS_LANG="$lang" "$module" "${args[@]}" >"$out_txt" 2>>"$err"; then
+      if ! UBS_METRICS_DIR="$metrics_dir" UBS_LANG="$lang" UBS_SKIP_TYPE_NARROWING="$SKIP_TYPE_NARROWING" "$module" "${args[@]}" >"$out_txt" 2>>"$err"; then
         module_status=$?
       fi
       restore_original_paths "$out_txt"
@@ -436,7 +439,7 @@ run_lang(){
       ;;
     text|*)
       prepare_metrics_dir "$metrics_dir"
-      if ! UBS_METRICS_DIR="$metrics_dir" UBS_LANG="$lang" "$module" "${args[@]}" >"$out_txt" 2>"$err"; then
+      if ! UBS_METRICS_DIR="$metrics_dir" UBS_LANG="$lang" UBS_SKIP_TYPE_NARROWING="$SKIP_TYPE_NARROWING" "$module" "${args[@]}" >"$out_txt" 2>"$err"; then
         module_status=$?
       fi
       restore_original_paths "$out_txt"
