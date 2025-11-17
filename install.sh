@@ -430,6 +430,8 @@ check_for_updates() {
       warn "New version available: $latest_version (you have $current_version)"
       if ask "Update to latest version now?"; then
         log "Re-running installer with latest version..."
+        # Clean up lock before exec (exec replaces process, so trap won't fire)
+        rmdir "$LOCK_FILE" 2>/dev/null
         exec bash <(curl -fsSL "$REPO_URL/install.sh") "${ORIGINAL_ARGS[@]}"
       fi
     else
