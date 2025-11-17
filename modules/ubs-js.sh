@@ -308,49 +308,73 @@ print_category() {
 print_subheader() { say "\n${YELLOW}${BOLD}$BULLET $1${RESET}"; }
 
 print_finding() {
-  local __severity=$1
-  local __raw_count=$2
-  local __title=$3
-  local __desc="${4:-}"
+  local severity="${1:-good}"
+  local arg2="${2-}"
+  local arg3="${3-}"
+  local arg4="${4-}"
+
+  local count=0
+  local title=""
+  local description=""
+
+  if [[ "$severity" == "good" ]]; then
+    if [[ -n "$arg3" && "$arg2" =~ ^[0-9]+$ ]]; then
+      count=$(printf '%s\n' "$arg2" | awk 'END{print $0+0}')
+      title="${arg3:-All checks look healthy}"
+      description="${arg4:-}"
+    else
+      title="${arg2:-All checks look healthy}"
+      description="${arg3:-}"
+    fi
+  else
+    local raw_count="${arg2:-0}"
+    count=$(printf '%s\n' "$raw_count" | awk 'END{print $0+0}')
+    title="${arg3:-}"
+    description="${arg4:-}"
+  fi
+
   if [[ -n "$REPORT_JSON" ]]; then
-    local __count; __count=$(printf '%s\n' "$__raw_count" | awk 'END{print $0+0}')
-    python3 - "$JSON_FINDINGS_TMP" "$MAX_JSON_SAMPLES" <<'PY' 2>/dev/null || true
+    python3 - "$JSON_FINDINGS_TMP" "$MAX_JSON_SAMPLES" "$severity" "$count" "$title" "$description" <<'PY' 2>/dev/null || true
 import json, sys
 tmp = sys.argv[1]
-# sys.argv[2] is MAX_JSON_SAMPLES (reserved for future per-finding truncation)
-obj = {"severity": sys.argv[3], "count": int(sys.argv[4]), "title": sys.argv[5], "description": (sys.argv[6] if len(sys.argv)>6 else "")}
-open(tmp, 'a', encoding='utf-8').write(json.dumps(obj, ensure_ascii=False)+'\n')
+severity = sys.argv[3]
+count = int(sys.argv[4])
+title = sys.argv[5]
+description = sys.argv[6] if len(sys.argv) > 6 else ""
+open(tmp, 'a', encoding='utf-8').write(
+    json.dumps({"severity": severity, "count": count, "title": title, "description": description}, ensure_ascii=False)
+    + '\n'
+)
 PY
   fi
-  local severity=$1
-  case $severity in
+
+  case "$severity" in
     good)
-      local title=$2
       say "  ${GREEN}${CHECK} OK${RESET} ${DIM}$title${RESET}"
+      [[ -n "$description" ]] && say "    ${DIM}$description${RESET}"
+      ;;
+    critical)
+      CRITICAL_COUNT=$((CRITICAL_COUNT + count))
+      say "  ${RED}${BOLD}${FIRE} CRITICAL${RESET} ${WHITE}($count found)${RESET}"
+      say "    ${RED}${BOLD}$title${RESET}"
+      [ -n "$description" ] && say "    ${DIM}$description${RESET}" || true
+      ;;
+    warning)
+      WARNING_COUNT=$((WARNING_COUNT + count))
+      say "  ${YELLOW}${WARN} Warning${RESET} ${WHITE}($count found)${RESET}"
+      say "    ${YELLOW}$title${RESET}"
+      [ -n "$description" ] && say "    ${DIM}$description${RESET}" || true
+      ;;
+    info)
+      INFO_COUNT=$((INFO_COUNT + count))
+      say "  ${BLUE}${INFO} Info${RESET} ${WHITE}($count found)${RESET}"
+      say "    ${BLUE}$title${RESET}"
+      [ -n "$description" ] && say "    ${DIM}$description${RESET}" || true
       ;;
     *)
-      local raw_count=$2; local title=$3; local description="${4:-}"
-      local count; count=$(printf '%s\n' "$raw_count" | awk 'END{print $0+0}')
-      case $severity in
-        critical)
-          CRITICAL_COUNT=$((CRITICAL_COUNT + count))
-          say "  ${RED}${BOLD}${FIRE} CRITICAL${RESET} ${WHITE}($count found)${RESET}"
-          say "    ${RED}${BOLD}$title${RESET}"
-          [ -n "$description" ] && say "    ${DIM}$description${RESET}" || true
-          ;;
-        warning)
-          WARNING_COUNT=$((WARNING_COUNT + count))
-          say "  ${YELLOW}${WARN} Warning${RESET} ${WHITE}($count found)${RESET}"
-          say "    ${YELLOW}$title${RESET}"
-          [ -n "$description" ] && say "    ${DIM}$description${RESET}" || true
-          ;;
-        info)
-          INFO_COUNT=$((INFO_COUNT + count))
-          say "  ${BLUE}${INFO} Info${RESET} ${WHITE}($count found)${RESET}"
-          say "    ${BLUE}$title${RESET}"
-          [ -n "$description" ] && say "    ${DIM}$description${RESET}" || true
-          ;;
-      esac
+      say "  ${CYAN}${INFO} ${severity^}${RESET} ${WHITE}($count found)${RESET}"
+      [[ -n "$title" ]] && say "    ${WHITE}$title${RESET}"
+      [ -n "$description" ] && say "    ${DIM}$description${RESET}" || true
       ;;
   esac
 }
@@ -2079,7 +2103,7 @@ print_category "Detects: Code injection, XSS, prototype pollution, timing attack
 print_subheader "eval() usage (CRITICAL SECURITY RISK)"
 eval_count=$( \
   ( \
-    ( [[ "$HAS_AST_GREP" -eq 1 ]] && ( set +o pipefail; "${AST_GREP_CMD[@]}" --pattern "eval($$)" "$PROJECT_DIR" 2>/dev/null || true ) ) \
+    ( [[ "$HAS_AST_GREP" -eq 1 ]] && ( set +o pipefail; "${AST_GREP_CMD[@]}" --pattern 'eval($$)' "$PROJECT_DIR" 2>/dev/null || true ) ) \
     || ( "${GREP_RN[@]}" -e "(^|[^\"'])[Ee]val[[:space:]]*\\(" "$PROJECT_DIR" 2>/dev/null || true ) \
   ) \
   | (grep -Ev "^[[:space:]]*(//|/\*|\*)" || true) \
@@ -2095,7 +2119,7 @@ fi
 print_subheader "new Function() (eval equivalent)"
 count=$( \
   ( \
-    ( [[ "$HAS_AST_GREP" -eq 1 ]] && ( set +o pipefail; "${AST_GREP_CMD[@]}" --pattern "new Function($$)" "$PROJECT_DIR" 2>/dev/null || true ) ) \
+    ( [[ "$HAS_AST_GREP" -eq 1 ]] && ( set +o pipefail; "${AST_GREP_CMD[@]}" --pattern 'new Function($$)' "$PROJECT_DIR" 2>/dev/null || true ) ) \
     || ( "${GREP_RN[@]}" -e "(^|[^\"'])\\bnew[[:space:]]+Function[[:space:]]*\\(" "$PROJECT_DIR" 2>/dev/null || true ) \
   ) \
   | (grep -Ev "^[[:space:]]*(//|/\*|\*)" || true) \
@@ -2109,7 +2133,7 @@ fi
 print_subheader "innerHTML with potential XSS risk"
 count=$( \
   ( \
-    ( [[ "$HAS_AST_GREP" -eq 1 ]] && "${AST_GREP_CMD[@]}" --pattern "$EL.innerHTML = $VAL" "$PROJECT_DIR" 2>/dev/null ) \
+    ( [[ "$HAS_AST_GREP" -eq 1 ]] && "${AST_GREP_CMD[@]}" --pattern '$EL.innerHTML = $VAL' "$PROJECT_DIR" 2>/dev/null ) \
     || "${GREP_RN[@]}" -e "\.innerHTML[[:space:]]*=" "$PROJECT_DIR" 2>/dev/null \
   ) \
      | (grep -v -E "escapeHtml|sanitize|DOMPurify" || true) \
