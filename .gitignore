@@ -23,6 +23,9 @@ tmp/
 temp/
 *.tmp
 
+# Python environments
+.venv/
+
 # Rust build artifacts
 **/target/
 **/*.rs.bk
