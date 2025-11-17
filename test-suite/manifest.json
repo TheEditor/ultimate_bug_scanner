@@ -296,6 +296,59 @@
       }
     },
     {
+      "id": "js-taint-buggy",
+      "description": "Lightweight taint analysis regression (sources reach sinks without sanitization).",
+      "path": "test-suite/js/buggy/taint_analysis.js",
+      "language": "js",
+      "tags": [
+        "js",
+        "security",
+        "taint",
+        "buggy"
+      ],
+      "args": [
+        "--only=js",
+        "--fail-on-warning"
+      ],
+      "expect": {
+        "exit_code": "nonzero",
+        "totals": {
+          "critical": {
+            "min": 1
+          }
+        },
+        "require_substrings": [
+          "Lightweight taint analysis"
+        ]
+      }
+    },
+    {
+      "id": "js-taint-clean",
+      "description": "Lightweight taint analysis clean baseline (sources sanitized before sinks).",
+      "path": "test-suite/js/clean/taint_analysis.js",
+      "language": "js",
+      "tags": [
+        "js",
+        "security",
+        "taint",
+        "clean"
+      ],
+      "args": [
+        "--only=js"
+      ],
+      "expect": {
+        "exit_code": "zero",
+        "totals": {
+          "critical": {
+            "max": 0
+          },
+          "warning": {
+            "max": 2
+          }
+        }
+      }
+    },
+    {
       "id": "python-buggy",
       "description": "Python buggy fixtures (enable once python module assertions stabilize).",
       "path": "test-suite/python/buggy",
