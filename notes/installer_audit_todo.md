@@ -5,3 +5,24 @@
 - [x] Synchronize the installer `VERSION` constant with the root `VERSION` file (target 4.6.0 everywhere).
 - [x] Add installer regression tests under `test-suite/install/` that spin up a disposable HOME, run `install.sh` with non-interactive flags, and assert the run reaches post-install verification without touching rc files when `--no-path-modify` is set.
 - [x] Document the new behavior in README/INSTALL notes (alias skipping, how to run installer tests, updated version badge/info).
+- [ ] Improve network error logging:
+  - [ ] Capture stderr for `check_for_updates`.
+  - [ ] Capture stderr for `download_binary_release` and mention final error line.
+  - [ ] Reuse helper for future network operations.
+- [ ] Introduce a `--dry-run` flag:
+  - [ ] Parse flag and expose `dry_run_enabled`.
+  - [ ] Wrap mutating operations (fs writes, PATH edits, hook installs, downloads) to log instead of executing when dry run is active.
+  - [ ] Ensure verification + smoke test steps are skipped or clearly logged in dry-run mode.
+- [ ] Logging polish:
+  - [ ] Use `log_section` for major banners (post-install verification, diagnostics).
+  - [ ] Consider padding/checkmark alignment for success/warn/error output.
+- [ ] Harden cleanup/locking:
+  - [ ] Track temp paths with `register_temp_path` and remove broad `/tmp/ripgrep-*` deletions.
+  - [ ] Replace directory lock with `flock` (fallback to mkdir) and ensure release uses helper.
+  - [ ] Update help text to mention new behavior if needed.
+- [ ] Provide a `--self-test` flag:
+  - [ ] Flag triggers running `test-suite/install/run_tests.sh` after install (or a lighter inline check) and fails if smoke suite fails.
+  - [ ] Useful for CI pipelines wanting automated validation.
+- [ ] Detect stale `ubs` binaries:
+  - [ ] After installation, compare `command -v ubs` result with `$install_dir/ubs` and warn if they differ.
+  - [ ] Document expected behavior in README.
