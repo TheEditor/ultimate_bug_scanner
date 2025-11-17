@@ -494,6 +494,7 @@ SANITIZER_REGEXES = [
     re.compile(r"template\.HTMLEscapeString"),
     re.compile(r"url\.QueryEscape"),
     re.compile(r"path\.Clean"),
+    re.compile(r"filepath\.Clean"),
 ]
 
 SINKS = [
@@ -505,9 +506,9 @@ SINKS = [
 ]
 
 ASSIGN_PATTERNS = [
-    re.compile(r"^(?P<targets>[A-Za-z_][\w]*(?:\s*,\s*[A-Za-z_][\w]*)*)\s*:=\s*(?P<expr>.+)"),
-    re.compile(r"^(?P<targets>[A-Za-z_][\w]*(?:\s*,\s*[A-Za-z_][\w]*)*)\s*=\s*(?P<expr>.+)"),
-    re.compile(r"^var\s+(?P<targets>[A-Za-z_][\w]*(?:\s*,\s*[A-Za-z_][\w]*)*)(?:\s+[A-Za-z0-9_\*\[\]]+)?\s*=\s*(?P<expr>.+)")
+    re.compile(r"^\s*(?P<targets>[A-Za-z_][\w]*(?:\s*,\s*[A-Za-z_][\w]*)*)\s*:=\s*(?P<expr>.+)"),
+    re.compile(r"^\s*(?P<targets>[A-Za-z_][\w]*(?:\s*,\s*[A-Za-z_][\w]*)*)\s*=\s*(?P<expr>.+)"),
+    re.compile(r"^\s*var\s+(?P<targets>[A-Za-z_][\w]*(?:\s*,\s*[A-Za-z_][\w]*)*)(?:\s+[A-Za-z0-9_\*\[\]]+)?\s*=\s*(?P<expr>.+)")
 ]
 
 def should_skip(path: Path) -> bool:
@@ -650,6 +651,8 @@ def analyze_file(path: Path, issues):
             if not match:
                 continue
             expr = match.group(1)
+            if rule == 'go.taint.sql' and '?' in expr and ',' in expr:
+                continue
             if not expr or expr_has_sanitizer(expr, rule):
                 continue
             direct = find_sources(expr)
