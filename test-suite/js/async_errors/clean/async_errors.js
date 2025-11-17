@@ -5,6 +5,8 @@ async function fetchUserProfile(id) {
   } catch (err) {
     console.error('Failed to load profile', err);
     throw err;
+  } finally {
+    console.log('profile fetch complete');
   }
 }
 
@@ -15,6 +17,9 @@ function saveSettings(settings) {
     .catch((err) => {
       console.error('Save failed', err);
       throw err;
+    })
+    .finally(() => {
+      console.log('settings sync complete');
     });
 }
 
@@ -26,6 +31,8 @@ async function loadAllProjects(projectIds) {
   } catch (err) {
     console.error('Project load failure', err);
     throw err;
+  } finally {
+    console.log('project fetch attempted');
   }
 }
 

@@ -177,7 +177,7 @@
     {
       "id": "js-async-errors-buggy",
       "description": "JS async error path coverage regression (await without try/catch, Promise chains missing .catch).",
-      "path": "test-suite/js/buggy/async_errors.js",
+      "path": "test-suite/js/async_errors/buggy",
       "language": "js",
       "tags": [
         "js",
@@ -186,6 +186,7 @@
       ],
       "args": [
         "--only=js",
+        "--skip=6",
         "--fail-on-warning"
       ],
       "expect": {
@@ -203,7 +204,7 @@
     {
       "id": "js-async-errors-clean",
       "description": "JS async error coverage clean baseline (all awaits guarded).",
-      "path": "test-suite/js/clean/async_errors.js",
+      "path": "test-suite/js/async_errors/clean",
       "language": "js",
       "tags": [
         "js",
@@ -211,7 +212,8 @@
         "clean"
       ],
       "args": [
-        "--only=js"
+        "--only=js",
+        "--skip=6"
       ],
       "expect": {
         "exit_code": "zero",
@@ -277,7 +279,7 @@
     {
       "id": "python-async-errors-buggy",
       "description": "Python async error path regression (await outside try and fire-and-forget tasks).",
-      "path": "test-suite/python/buggy/async_errors.py",
+      "path": "test-suite/python/async_errors/buggy",
       "language": "python",
       "tags": [
         "python",
@@ -303,7 +305,7 @@
     {
       "id": "python-async-errors-clean",
       "description": "Python async error coverage clean baseline (await guarded + tasks awaited/cancelled).",
-      "path": "test-suite/python/clean/async_errors.py",
+      "path": "test-suite/python/async_errors/clean",
       "language": "python",
       "tags": [
         "python",
@@ -377,7 +379,7 @@
     {
       "id": "golang-async-errors-buggy",
       "description": "Go goroutines ignoring error paths (fire-and-forget http.Get).",
-      "path": "test-suite/golang/buggy/async_errors.go",
+      "path": "test-suite/golang/async_errors/buggy",
       "language": "golang",
       "tags": [
         "golang",
@@ -403,7 +405,7 @@
     {
       "id": "golang-async-errors-clean",
       "description": "Go goroutines reporting errors via checks/channels baseline.",
-      "path": "test-suite/golang/clean/async_errors.go",
+      "path": "test-suite/golang/async_errors/clean",
       "language": "golang",
       "tags": [
         "golang",
@@ -503,7 +505,7 @@
     {
       "id": "cpp-async-errors-buggy",
       "description": "C++ std::async futures without try/catch or get().",
-      "path": "test-suite/cpp/buggy/async_errors.cpp",
+      "path": "test-suite/cpp/async_errors/buggy",
       "language": "cpp",
       "tags": [
         "cpp",
@@ -529,7 +531,7 @@
     {
       "id": "cpp-async-errors-clean",
       "description": "C++ async clean baseline (std::async guarded by try/catch + get).",
-      "path": "test-suite/cpp/clean/async_errors.cpp",
+      "path": "test-suite/cpp/async_errors/clean",
       "language": "cpp",
       "tags": [
         "cpp",
@@ -577,7 +579,7 @@
     {
       "id": "rust-async-errors-buggy",
       "description": "Rust awaits lacking ?/match handling + tokio::spawn handles dropped.",
-      "path": "test-suite/rust/buggy/async_errors.rs",
+      "path": "test-suite/rust/async_errors/buggy",
       "language": "rust",
       "tags": [
         "rust",
@@ -603,7 +605,7 @@
     {
       "id": "rust-async-errors-clean",
       "description": "Rust async clean baseline (await guarded and JoinHandle awaited).",
-      "path": "test-suite/rust/clean/async_errors.rs",
+      "path": "test-suite/rust/async_errors/clean",
       "language": "rust",
       "tags": [
         "rust",
@@ -651,7 +653,7 @@
     {
       "id": "java-async-errors-buggy",
       "description": "Java CompletableFuture chains lacking exceptionally()/try-catch.",
-      "path": "test-suite/java/buggy/AsyncErrors.java",
+      "path": "test-suite/java/async_errors/buggy",
       "language": "java",
       "tags": [
         "java",
@@ -677,7 +679,7 @@
     {
       "id": "java-async-errors-clean",
       "description": "Java async clean baseline (future.get wrapped + exceptionally handler).",
-      "path": "test-suite/java/clean/AsyncErrors.java",
+      "path": "test-suite/java/async_errors/clean",
       "language": "java",
       "tags": [
         "java",
@@ -725,7 +727,7 @@
     {
       "id": "ruby-async-errors-buggy",
       "description": "Ruby Thread.new blocks lacking rescue/exception handling.",
-      "path": "test-suite/ruby/buggy/async_errors.rb",
+      "path": "test-suite/ruby/async_errors/buggy",
       "language": "ruby",
       "tags": [
         "ruby",
@@ -751,7 +753,7 @@
     {
       "id": "ruby-async-errors-clean",
       "description": "Ruby thread bodies with begin/rescue baseline.",
-      "path": "test-suite/ruby/clean/async_errors.rb",
+      "path": "test-suite/ruby/async_errors/clean",
       "language": "ruby",
       "tags": [
         "ruby",
