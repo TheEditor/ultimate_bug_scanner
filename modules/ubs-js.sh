@@ -55,21 +55,18 @@ USER_RULE_DIR=""
 DISABLE_PIPEFAIL_DURING_SCAN=1
 
 # Async error coverage spec (rule ids -> metadata)
-ASYNC_ERROR_RULE_IDS=(js.async.then-no-catch js.async.promiseall-no-try js.await-non-async)
+ASYNC_ERROR_RULE_IDS=(js.async.then-no-catch js.async.promiseall-no-try)
 declare -A ASYNC_ERROR_SUMMARY=(
   [js.async.then-no-catch]='Promise.then chain missing .catch()'
   [js.async.promiseall-no-try]='Promise.all without try/catch'
-  [js.await-non-async]='await keyword used outside async context'
 )
 declare -A ASYNC_ERROR_REMEDIATION=(
   [js.async.then-no-catch]='Chain .catch() (or .finally()) to surface rejections'
   [js.async.promiseall-no-try]='Wrap Promise.all in try/catch to handle aggregate failures'
-  [js.await-non-async]='Mark the surrounding function as async or remove await'
 )
 declare -A ASYNC_ERROR_SEVERITY=(
   [js.async.then-no-catch]='warning'
   [js.async.promiseall-no-try]='warning'
-  [js.await-non-async]='critical'
 )
 
 # Error handling AST metadata
@@ -1397,17 +1394,6 @@ rule:
     - pattern: $X !== NaN
 severity: critical
 message: "Direct NaN comparison is always false; use Number.isNaN(x)"
-YAML
-  cat >"$AST_RULE_DIR/await-non-async.yml" <<'YAML'
-id: js.await-non-async
-language: javascript
-rule:
-  pattern: await $EXPR
-  not:
-    inside:
-      pattern: async function $FN($$) { $$ }
-severity: critical
-message: "await used inside non-async function"
 YAML
   cat >"$AST_RULE_DIR/innerHTML-assign.yml" <<'YAML'
 id: js.innerHTML-assign
