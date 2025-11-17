@@ -80,7 +80,6 @@ log_section() {
   echo ""
   echo -e "${BOLD}${BLUE}═══════════════════════════════════════════════════${RESET}"
   echo -e "${BOLD}${BLUE}   ${title}${RESET}"
-  echo -e "${BOLD}${BLUE}═══════════════════════════════════════════════════${RESET}"
   echo ""
 }
 
@@ -667,10 +666,10 @@ verify_installation() {
     return 0
   fi
 
+  log_section "Post-Install Verification"
   log "Running post-install verification..."
   local errors=0
   local had_ubs=0
-  log_section "POST-INSTALL VERIFICATION"
 
   # Test 1: Command available
   if command -v ubs >/dev/null 2>&1; then
@@ -958,7 +957,7 @@ CONFIG
 }
 
 diagnostic_check() {
-  log_section "ULTIMATE BUG SCANNER DIAGNOSTIC REPORT"
+  log_section "Diagnostic Report"
 
   # System info
   echo -e "${BOLD}System Information:${RESET}"
@@ -1101,7 +1100,6 @@ diagnostic_check() {
   fi
   echo ""
 
-  echo -e "${BOLD}${BLUE}═══════════════════════════════════════════════════${RESET}"
   echo ""
   echo -e "${BOLD}💡 To share this diagnostic report:${RESET}"
   echo "   Run: curl -fsSL ... | bash -s -- --diagnose > ubs-diagnostic.txt"
@@ -1110,11 +1108,7 @@ diagnostic_check() {
 }
 
 uninstall_ubs() {
-  echo ""
-  echo -e "${BOLD}${YELLOW}═══════════════════════════════════════════════════${RESET}"
-  echo -e "${BOLD}${YELLOW}   UNINSTALL ULTIMATE BUG SCANNER${RESET}"
-  echo -e "${BOLD}${YELLOW}═══════════════════════════════════════════════════${RESET}"
-  echo ""
+  log_section "Uninstall Ultimate Bug Scanner"
 
   warn "This will remove Ultimate Bug Scanner and all integrations"
   if ! ask "Continue with uninstall?"; then
