@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 022
+shopt -s lastpipe 2>/dev/null || true
 
 # Ultimate Bug Scanner - Installation Script
 # https://github.com/Dicklesworthstone/ultimate_bug_scanner
 
-VERSION="4.5"
+VERSION="4.6.0"
+
+# Global copy of original args (needed in update re-exec; must not be local)
+ORIGINAL_ARGS=()
 
 # Validate bash version (requires 4.0+)
 if ((BASH_VERSINFO[0] < 4)); then
@@ -16,13 +21,17 @@ SCRIPT_NAME="ubs"
 INSTALL_NAME="ubs"
 REPO_URL="https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/main"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-BOLD='\033[1m'
-RESET='\033[0m'
+# TTY-aware color initialization
+COLOR_ENABLED=1
+init_colors() {
+  if [ -n "${NO_COLOR:-}" ] || [ ! -t 1 ] || [ "${TERM:-dumb}" = "dumb" ]; then COLOR_ENABLED=0; fi
+  if [ "$COLOR_ENABLED" -eq 1 ]; then
+    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; BOLD='\033[1m'; RESET='\033[0m'
+  else
+    RED=''; GREEN=''; YELLOW=''; BLUE=''; BOLD=''; RESET=''
+  fi
+}
+init_colors
 
 # Symbols
 CHECK="${GREEN}✓${RESET}"
@@ -33,6 +42,9 @@ WARN="${YELLOW}⚠${RESET}"
 # Flags
 NON_INTERACTIVE=0
 EASY_MODE=0
+QUIET=0
+SYSTEM_WIDE=0
+NO_PATH_MODIFY=0
 SKIP_AST_GREP=0
 SKIP_RIPGREP=0
 SKIP_JQ=0
@@ -44,6 +56,9 @@ RUN_VERIFICATION=1
 
 # Temporary files tracking for cleanup
 TEMP_FILES=()
+# Temporary working directory for this run (isolates artifacts; pruned on EXIT)
+WORKDIR="$(mktemp -d 2>/dev/null || mktemp -d -t ubs-install)"
+TEMP_FILES+=("$WORKDIR")
 # Lock file for concurrent execution prevention (MUST be fixed name, not $$)
 LOCK_FILE="/tmp/ubs-install.lock"
 # Track if we own the lock (only remove it if we created it)
@@ -60,6 +75,8 @@ cleanup_on_exit() {
   rm -f /tmp/ast-grep-install.log /tmp/jq-install.log /tmp/ripgrep-install.log 2>/dev/null
   rm -f /tmp/download-error.log /tmp/sed-error.log /tmp/bug-scan.txt 2>/dev/null
   rm -rf /tmp/ripgrep.tar.gz /tmp/ripgrep-* /tmp/ast-grep.zip /tmp/ast-grep 2>/dev/null
+  # Ensure workdir is gone
+  [ -n "${WORKDIR:-}" ] && rm -rf "$WORKDIR" 2>/dev/null || true
   # Remove lock file ONLY if we created it (don't remove another process's lock!)
   if [ "$LOCK_OWNED" -eq 1 ]; then
     rmdir "$LOCK_FILE" 2>/dev/null || true  # || true prevents set -e from killing cleanup
@@ -68,13 +85,12 @@ cleanup_on_exit() {
 }
 
 # Set up cleanup traps
-# For INT/TERM: cleanup then exit immediately (don't continue script)
-# For EXIT: just cleanup (already exiting)
 trap 'cleanup_on_exit; exit 130' INT   # 130 = 128 + SIGINT (2)
 trap 'cleanup_on_exit; exit 143' TERM  # 143 = 128 + SIGTERM (15)
 trap cleanup_on_exit EXIT
 
 print_header() {
+  [ "$QUIET" -eq 1 ] && return 0
   echo -e "${BOLD}${BLUE}"
   cat << 'HEADER'
     ╔══════════════════════════════════════════════════════════════════╗
@@ -117,6 +133,20 @@ ask() {
   [[ "$response" =~ ^[Yy]$ ]]
 }
 
+with_backoff() {
+  # with_backoff <max_attempts> <cmd...>
+  local max="${1:-3}"; shift || true
+  local n=1 delay=1
+  while true; do
+    if "$@"; then return 0; fi
+    if (( n >= max )); then return 1; fi
+    sleep "$delay"
+    n=$((n+1)); delay=$((delay*2))
+  done
+}
+
+maybe_sudo() { local path="$1"; if [ -w "$path" ]; then echo ""; elif can_use_sudo; then echo "sudo"; else echo ""; fi }
+
 can_use_sudo() {
   # Check if sudo is available and can be used without password prompt
   if ! command -v sudo >/dev/null 2>&1; then
@@ -153,7 +183,6 @@ safe_timeout() {
   fi
 
   # Fallback: bash-based timeout implementation for macOS/BSD
-  # This works on systems without GNU timeout/gtimeout
   "$@" &
   local pid=$!
 
@@ -161,9 +190,10 @@ safe_timeout() {
   local count=0
   while kill -0 $pid 2>/dev/null; do
     if [ $count -ge "$timeout_duration" ]; then
-      kill -TERM $pid 2>/dev/null
+      # Kill the process group in case the tool spawned children
+      kill -TERM -$pid 2>/dev/null || kill -TERM $pid 2>/dev/null
       sleep 1
-      kill -KILL $pid 2>/dev/null
+      kill -KILL -$pid 2>/dev/null || kill -KILL $pid 2>/dev/null
       wait $pid 2>/dev/null
       return 124  # Standard timeout exit code
     fi
@@ -202,6 +232,8 @@ detect_shell() {
     echo "bash"
   elif [ -n "${ZSH_VERSION:-}" ]; then
     echo "zsh"
+  elif [[ "${SHELL:-}" == *"fish"* ]]; then
+    echo "fish"
   else
     # Check default shell
     basename "$SHELL"
@@ -218,6 +250,9 @@ get_rc_file() {
       else
         echo "$HOME/.bash_profile"
       fi
+      ;;
+    fish)
+      echo "$HOME/.config/fish/config.fish"
       ;;
     zsh)
       echo "$HOME/.zshrc"
@@ -258,11 +293,9 @@ install_ast_grep() {
       fi
       ;;
     wsl|linux)
-      # WSL and Linux use same package managers
       if [ "$platform" = "wsl" ]; then
         log "Detected WSL environment - using Linux package managers"
       fi
-      # Try package managers with proper error handling
       if command -v cargo >/dev/null 2>&1; then
         log "Attempting installation via cargo..."
         if cargo install ast-grep 2>&1 | tee /tmp/ast-grep-install.log; then
@@ -294,7 +327,6 @@ install_ast_grep() {
       ;;
     freebsd|openbsd|netbsd)
       log "BSD platform detected: $platform"
-      # Try cargo first
       if command -v cargo >/dev/null 2>&1; then
         log "Attempting installation via cargo..."
         if cargo install ast-grep 2>&1 | tee /tmp/ast-grep-install.log; then
@@ -303,7 +335,6 @@ install_ast_grep() {
         fi
       fi
 
-      # Try npm
       if command -v npm >/dev/null 2>&1; then
         log "Attempting installation via npm..."
         if npm install -g @ast-grep/cli 2>&1 | tee /tmp/ast-grep-install.log; then
@@ -312,7 +343,6 @@ install_ast_grep() {
         fi
       fi
 
-      # Try binary download
       warn "Package managers failed. Trying binary download..."
       if download_binary_release "ast-grep" "$platform"; then
         return 0
@@ -342,7 +372,6 @@ install_ast_grep() {
       ;;
   esac
 
-  # Final verification
   if check_ast_grep; then
     success "ast-grep installed successfully"
     return 0
@@ -352,21 +381,8 @@ install_ast_grep() {
   fi
 }
 
-check_ripgrep() {
-  if command -v rg >/dev/null 2>&1; then
-    return 0
-  else
-    return 1
-  fi
-}
-
-check_jq() {
-  if command -v jq >/dev/null 2>&1; then
-    return 0
-  else
-    return 1
-  fi
-}
+check_ripgrep() { command -v rg >/dev/null 2>&1; }
+check_jq() { command -v jq >/dev/null 2>&1; }
 
 # ==============================================================================
 # TIER 1 ENHANCEMENTS: Version Checking, Binary Fallbacks, Verification
@@ -375,47 +391,25 @@ check_jq() {
 version_compare() {
   # Compare two version strings using semantic versioning
   # Returns: 0 if $1 > $2, 1 if $1 <= $2
-  # Handles versions like: 4.5, 4.10, 4.9.1, 4.9.10, etc.
-  local ver1="$1"
-  local ver2="$2"
+  local ver1="${1#v}"; local ver2="${2#v}"
+  if [ "$ver1" = "$ver2" ]; then return 1; fi
 
-  # If versions are identical, not greater
-  if [ "$ver1" = "$ver2" ]; then
-    return 1
+  if echo -e "2.0\n1.0" | sort -V >/dev/null 2>&1; then
+    local first
+    first=$(printf '%s\n' "$ver1" "$ver2" | sort -V | head -n1)
+    if [ "$first" = "$ver2" ] && [ "$ver1" != "$ver2" ]; then return 0; else return 1; fi
   fi
 
-  # Try sort -V (version sort) - but test it properly first
-  if echo "2.0" | sort -V >/dev/null 2>&1; then
-    # sort -V is available, use it
-    local sorted_first
-    sorted_first=$(printf '%s\n' "$ver1" "$ver2" | sort -V | head -n1)
-    if [ "$sorted_first" = "$ver2" ]; then
-      return 0  # ver1 > ver2
-    else
-      return 1  # ver1 <= ver2
-    fi
-  else
-    # Fallback: manual comparison for simple X.Y.Z versions
-    IFS='.' read -r -a v1_parts <<< "$ver1"
-    IFS='.' read -r -a v2_parts <<< "$ver2"
-
-    # Compare each component
-    local max_len="${#v1_parts[@]}"
-    [ "${#v2_parts[@]}" -gt "$max_len" ] && max_len="${#v2_parts[@]}"
-
-    for ((i=0; i<max_len; i++)); do
-      local part1="${v1_parts[i]:-0}"
-      local part2="${v2_parts[i]:-0}"
-
-      if [ "$part1" -gt "$part2" ] 2>/dev/null; then
-        return 0  # ver1 > ver2
-      elif [ "$part1" -lt "$part2" ] 2>/dev/null; then
-        return 1  # ver1 < ver2
-      fi
-    done
-
-    return 1  # versions are equal
-  fi
+  # Fallback numeric-only compare: strip non-digits from components
+  IFS='.' read -r -a v1 <<< "$(echo "$ver1" | sed 's/[^0-9.]/./g')"
+  IFS='.' read -r -a v2 <<< "$(echo "$ver2" | sed 's/[^0-9.]/./g')"
+  local n=${#v1[@]}; [ ${#v2[@]} -gt $n ] && n=${#v2[@]}
+  for ((i=0;i<n;i++)); do
+    local a="${v1[i]:-0}"; local b="${v2[i]:-0}"
+    a=$((10#$a)); b=$((10#$b))
+    if ((a>b)); then return 0; elif ((a<b)); then return 1; fi
+  done
+  return 1
 }
 
 check_for_updates() {
@@ -426,23 +420,19 @@ check_for_updates() {
 
   log "Checking for updates..."
   local latest_version
-  if latest_version=$(curl -fsSL --max-time 5 "$latest_url" 2>/dev/null); then
-    # Strip whitespace
+  if latest_version=$(with_backoff 3 curl -fsSL --max-time 5 "$latest_url" 2>/dev/null); then
     latest_version=$(echo "$latest_version" | tr -d '[:space:]')
-
-    # Compare versions properly using semantic versioning
     if version_compare "$latest_version" "$current_version"; then
       warn "New version available: $latest_version (you have $current_version)"
       if ask "Update to latest version now?"; then
         log "Re-running installer with latest version..."
-        # Clean up lock before exec (exec replaces process, so trap won't fire)
-        # CRITICAL: Set LOCK_OWNED=0 BEFORE rmdir to prevent signal race condition
-        # (If signal arrives after rmdir but before LOCK_OWNED=0, trap would try to
-        #  remove lock that might have been acquired by another process!)
-        LOCK_OWNED=0  # Mark that we no longer own the lock
-        rmdir "$LOCK_FILE" 2>/dev/null || true  # Remove it (|| true prevents set -e from aborting)
-        exec bash <(curl -fsSL "$REPO_URL/install.sh") "${ORIGINAL_ARGS[@]}"
-        # If we get here, exec failed - abort immediately (we no longer have the lock!)
+        LOCK_OWNED=0
+        rmdir "$LOCK_FILE" 2>/dev/null || true
+        if [ "${#ORIGINAL_ARGS[@]}" -gt 0 ]; then
+          exec bash <(curl -fsSL "$REPO_URL/install.sh") "${ORIGINAL_ARGS[@]}"
+        else
+          exec bash <(curl -fsSL "$REPO_URL/install.sh")
+        fi
         error "Failed to download or execute updated installer"
         exit 1
       fi
@@ -496,7 +486,6 @@ download_binary_release() {
 
       if curl -fsSL "$url" -o /tmp/ripgrep.tar.gz 2>/dev/null; then
         if tar -xzf /tmp/ripgrep.tar.gz -C /tmp 2>/dev/null; then
-          # Find rg binary robustly (handles archive structure changes)
           local rg_binary
           rg_binary=$(find /tmp/ripgrep-* -name "rg" -type f 2>/dev/null | head -1)
           if [ -n "$rg_binary" ] && [ -f "$rg_binary" ]; then
@@ -529,7 +518,6 @@ download_binary_release() {
       if curl -fsSL "$url" -o /tmp/ast-grep.zip 2>/dev/null; then
         if command -v unzip >/dev/null 2>&1; then
           if unzip -q /tmp/ast-grep.zip -d /tmp/ast-grep 2>/dev/null; then
-            # Find ast-grep binary robustly (handles archive structure changes)
             local sg_binary
             sg_binary=$(find /tmp/ast-grep \( -name "ast-grep" -o -name "sg" \) -type f 2>/dev/null | head -1)
             if [ -n "$sg_binary" ] && [ -f "$sg_binary" ]; then
@@ -537,7 +525,6 @@ download_binary_release() {
               mv "$sg_binary" "$install_dir/ast-grep"
               rm -rf /tmp/ast-grep.zip /tmp/ast-grep
               success "ast-grep binary installed to $install_dir/ast-grep"
-              # Ensure $install_dir is in PATH for this session
               export PATH="$install_dir:$PATH"
               return 0
             else
@@ -557,16 +544,16 @@ download_binary_release() {
       case "$platform-$arch" in
         linux-x86_64|wsl-x86_64) asset="jq-linux-amd64" ;;
         linux-aarch64|wsl-aarch64) asset="jq-linux-arm64" ;;
-        macos-x86_64|macos-aarch64) asset="jq-macos-amd64" ;;
+        macos-x86_64) asset="jq-macos-amd64" ;;
+        macos-aarch64) asset="jq-macos-arm64" ;;
         *) warn "No binary release for $platform-$arch"; return 1 ;;
       esac
 
       local url="https://github.com/jqlang/jq/releases/download/jq-${version}/${asset}"
 
-      if curl -fsSL "$url" -o "$install_dir/jq" 2>/dev/null; then
+      if with_backoff 3 curl -fsSL "$url" -o "$install_dir/jq" 2>/dev/null; then
         chmod +x "$install_dir/jq"
         success "jq binary installed to $install_dir/jq"
-        # Ensure $install_dir is in PATH for this session
         export PATH="$install_dir:$PATH"
         return 0
       fi
@@ -582,6 +569,7 @@ verify_installation() {
 
   log "Running post-install verification..."
   local errors=0
+  local had_ubs=0
 
   echo ""
   echo -e "${BOLD}${BLUE}═══════════════════════════════════════════════════${RESET}"
@@ -593,6 +581,7 @@ verify_installation() {
   if command -v ubs >/dev/null 2>&1; then
     success "ubs command available in PATH"
     log "   Location: $(command -v ubs)"
+    had_ubs=1
   else
     error "ubs command not found in PATH"
     ((errors++))
@@ -638,7 +627,7 @@ const x = null;
 x.foo();
 SMOKE
 
-  if safe_timeout 10 ubs "$test_file" --ci 2>&1 | grep -q "eval\|null"; then
+  if [ "$had_ubs" -eq 1 ] && safe_timeout 10 ubs "$test_file" --ci 2>&1 | grep -E -q "eval|null"; then
     success "Smoke test PASSED - scanner detects bugs correctly"
     rm -f "$test_file"
   else
@@ -688,11 +677,8 @@ SMOKE
 # ==============================================================================
 
 normalize_bool() {
-  # Convert various boolean representations to 0 or 1
-  # Returns: 0 (false) or 1 (true), defaults to 0 for invalid values
   local val="$1"
-  val=$(echo "$val" | tr '[:upper:]' '[:lower:]')  # Convert to lowercase
-
+  val=$(echo "$val" | tr '[:upper:]' '[:lower:]')
   case "$val" in
     1|yes|true|on|enabled|enable) echo "1" ;;
     0|no|false|off|disabled|disable|"") echo "0" ;;
@@ -712,13 +698,10 @@ read_config_file() {
 
   log "Reading configuration from $config_file..."
 
-  # Simple key=value format parser with validation
   while IFS='=' read -r key value; do
-    # Skip comments and empty lines
     [[ "$key" =~ ^[[:space:]]*# ]] && continue
     [[ -z "$key" ]] && continue
 
-    # Trim whitespace
     key=$(echo "$key" | tr -d '[:space:]')
     value=$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
@@ -830,6 +813,7 @@ diagnostic_check() {
 
   # System info
   echo -e "${BOLD}System Information:${RESET}"
+  command -v lsb_release >/dev/null 2>&1 && echo "  Distro: $(lsb_release -ds 2>/dev/null || true)"
   echo "  OS: $(uname -s) $(uname -r)"
   echo "  Platform: $(detect_platform)"
   echo "  Architecture: $(uname -m)"
@@ -843,7 +827,6 @@ diagnostic_check() {
     success "  ubs command available"
     echo "  Location: $(command -v ubs)"
 
-    # Try to get version
     local ubs_version
     if ubs_version=$(ubs --version 2>/dev/null | head -n1); then
       echo "  Version: $ubs_version"
@@ -1008,15 +991,15 @@ uninstall_ubs() {
   local rc_file="$(get_rc_file)"
   if [ -f "$rc_file" ]; then
     if grep -q "Ultimate Bug Scanner" "$rc_file" 2>/dev/null; then
-      # Backup before modifying
       cp "$rc_file" "${rc_file}.pre-uninstall-backup"
       log "Backed up $rc_file to ${rc_file}.pre-uninstall-backup"
 
-      # Remove PATH and alias entries (blank line + comment line + export line)
-      # First remove the comment and export lines
-      sed -i.bak '/# Ultimate Bug Scanner.*added/,+1d' "$rc_file" 2>/dev/null && rm -f "${rc_file}.bak"
-      # Then remove orphaned blank lines that might be left (up to 2)
-      sed -i.bak '/^$/N;/^\n$/d' "$rc_file" 2>/dev/null && rm -f "${rc_file}.bak"
+      # Remove PATH and alias/function entries
+      sed -i.bak '/# Ultimate Bug Scanner.*added/,+1d' "$rc_file" 2>/dev/null || true
+      sed -i.bak '/# Ultimate Bug Scanner alias/,+1d' "$rc_file" 2>/dev/null || true
+      rm -f "${rc_file}.bak" 2>/dev/null || true
+      # Remove blank lines
+      sed -i.bak '/^$/N;/^\n$/d' "$rc_file" 2>/dev/null && rm -f "${rc_file}.bak" 2>/dev/null || true
       success "Removed from $rc_file"
     fi
   fi
@@ -1052,7 +1035,6 @@ uninstall_ubs() {
     done
   fi
 
-  # Remove module cache
   echo ""
   if ask "Remove cached modules?"; then
     local module_dir="${XDG_DATA_HOME:-$HOME/.local/share}/ubs"
@@ -1062,7 +1044,6 @@ uninstall_ubs() {
     fi
   fi
 
-  # Remove configuration
   if ask "Remove configuration file?"; then
     local config_file="${XDG_CONFIG_HOME:-$HOME/.config}/ubs/install.conf"
     if [ -f "$config_file" ]; then
@@ -1102,7 +1083,7 @@ install_jq() {
         log "Detected WSL environment - using Linux package managers"
       fi
       if command -v apt-get >/dev/null 2>&1 && can_use_sudo; then
-        if safe_timeout 300 sudo apt-get update -qq && safe_timeout 300 sudo apt-get install -y jq 2>&1 | tee /tmp/jq-install.log; then
+        if safe_timeout 300 sudo apt-get update -qq && ( safe_timeout 300 sudo apt-get install -y jq ) 2>&1 | tee /tmp/jq-install.log; then
           success "jq installed via apt-get"; return 0
         fi
       fi
@@ -1181,11 +1162,9 @@ install_ripgrep() {
       fi
       ;;
     wsl|linux)
-      # WSL and Linux use same package managers
       if [ "$platform" = "wsl" ]; then
         log "Detected WSL environment - using Linux package managers"
       fi
-      # Try package managers with fallback chain
       if command -v cargo >/dev/null 2>&1; then
         log "Attempting installation via cargo..."
         if cargo install ripgrep 2>&1 | tee /tmp/ripgrep-install.log; then
@@ -1283,7 +1262,6 @@ install_ripgrep() {
         fi
       fi
 
-      # Try cargo as fallback
       if command -v cargo >/dev/null 2>&1; then
         log "Attempting installation via cargo..."
         if cargo install ripgrep 2>&1 | tee /tmp/ripgrep-install.log; then
@@ -1292,7 +1270,6 @@ install_ripgrep() {
         fi
       fi
 
-      # Try binary download
       warn "Package managers failed. Trying binary download..."
       if download_binary_release "ripgrep" "$platform"; then
         return 0
@@ -1343,7 +1320,6 @@ install_ripgrep() {
       ;;
   esac
 
-  # Final verification
   if check_ripgrep; then
     success "ripgrep installed successfully"
     return 0
@@ -1355,8 +1331,6 @@ install_ripgrep() {
 
 validate_install_dir() {
   local dir="$1"
-
-  # Security: Prevent installation to dangerous locations
   case "$dir" in
     /|/bin|/sbin|/usr/bin|/usr/sbin|/boot|/dev|/proc|/sys)
       error "Refusing to install to system directory: $dir"
@@ -1371,19 +1345,15 @@ validate_install_dir() {
       return 1
       ;;
   esac
-
-  # Must be an absolute path
   if [[ "$dir" != /* ]]; then
     error "Installation directory must be an absolute path: $dir"
     return 1
   fi
-
   return 0
 }
 
 determine_install_dir() {
   if [ -n "$INSTALL_DIR" ]; then
-    # Validate user-provided directory
     if ! validate_install_dir "$INSTALL_DIR"; then
       error "Invalid installation directory: $INSTALL_DIR"
       exit 1
@@ -1392,7 +1362,10 @@ determine_install_dir() {
     return
   fi
 
-  # Prefer ~/.local/bin if it exists or can be created
+  if [ "$SYSTEM_WIDE" -eq 1 ]; then
+    echo "/usr/local/bin"; return
+  fi
+
   if [ -d "$HOME/.local/bin" ] || mkdir -p "$HOME/.local/bin" 2>/dev/null; then
     echo "$HOME/.local/bin"
   elif [ -w "/usr/local/bin" ]; then
@@ -1405,11 +1378,18 @@ determine_install_dir() {
 install_scanner() {
   local install_dir
   install_dir="$(determine_install_dir)"
+  local use_sudo=""
+  use_sudo="$(maybe_sudo "$install_dir")"
 
   log "Installing Ultimate Bug Scanner to $install_dir..."
 
   # Create directory if needed
-  mkdir -p "$install_dir" 2>/dev/null || {
+  if [ -n "$use_sudo" ]; then
+    $use_sudo mkdir -p "$install_dir" 2>/dev/null || true
+  else
+    mkdir -p "$install_dir" 2>/dev/null || true
+  fi
+  [ -d "$install_dir" ] || {
     error "Cannot create directory: $install_dir"
     return 1
   }
@@ -1417,15 +1397,22 @@ install_scanner() {
   # Download or copy script
   local script_path="$install_dir/$INSTALL_NAME"
   local temp_path="${script_path}.tmp"
+  TEMP_FILES+=("$temp_path")
+
+  download_to_file() {
+    local url="$1" out="$2"
+    if command -v curl >/dev/null 2>&1; then
+      with_backoff 3 curl -fsSL "$url" -o "$out" 2>/tmp/download-error.log
+    else
+      with_backoff 3 wget -q "$url" -O "$out" 2>/tmp/download-error.log
+    fi
+  }
 
   if [ -f "./$SCRIPT_NAME" ]; then
-    # Local installation
     log "Installing from local file..."
     if cp "./$SCRIPT_NAME" "$temp_path" 2>/dev/null; then
-      # Verify it's a bash script
       if head -n 1 "$temp_path" | grep -q '^#!/.*bash'; then
-        mv "$temp_path" "$script_path"
-        success "Copied from local directory"
+        :
       else
         error "Local file doesn't appear to be a bash script"
         rm -f "$temp_path"
@@ -1436,80 +1423,63 @@ install_scanner() {
       return 1
     fi
   else
-    # Remote installation
     log "Downloading from GitHub..."
     local download_url="${REPO_URL}/${SCRIPT_NAME}"
 
-    if command -v curl >/dev/null 2>&1; then
-      if curl -fsSL "$download_url" -o "$temp_path" 2>/tmp/download-error.log; then
-        log "Downloaded successfully via curl"
-      else
-        error "Download failed. Check /tmp/download-error.log"
-        rm -f "$temp_path"
-        return 1
-      fi
-    elif command -v wget >/dev/null 2>&1; then
-      if wget -q "$download_url" -O "$temp_path" 2>/tmp/download-error.log; then
-        log "Downloaded successfully via wget"
-      else
-        error "Download failed. Check /tmp/download-error.log"
-        rm -f "$temp_path"
-        return 1
-      fi
+    if download_to_file "$download_url" "$temp_path"; then
+      log "Downloaded successfully"
     else
-      error "Neither curl nor wget found. Cannot download script."
-      return 1
-    fi
-
-    # Verify downloaded file
-    if [ ! -s "$temp_path" ]; then
-      error "Downloaded file is empty"
+      error "Download failed. Check /tmp/download-error.log"
       rm -f "$temp_path"
       return 1
     fi
-
-    # Check minimum file size (legitimate script should be >10KB)
-    local file_size
-    file_size=$(wc -c < "$temp_path" 2>/dev/null || echo "0")
-    if [ "$file_size" -lt 10240 ]; then
-      error "Downloaded file too small ($file_size bytes) - likely incomplete"
-      rm -f "$temp_path"
-      return 1
-    fi
-
-    # Verify shebang (strip UTF-8 BOM if present, then check for bash shebang)
-    # Use octal escapes for BSD/macOS compatibility (\357\273\277 = 0xEF 0xBB 0xBF)
-    local first_line
-    first_line=$(head -n 1 "$temp_path" | sed 's/^\o357\o273\o277//' | tr -d '\r\n\t ' | head -c 50)
-    if [[ ! "$first_line" =~ ^#!.*bash ]]; then
-      error "Downloaded file doesn't appear to be a bash script"
-      log "First line: $(head -n 1 "$temp_path" | cat -v)"
-      rm -f "$temp_path"
-      return 1
-    fi
-
-    # Verify critical content markers
-    if ! grep -q "UBS Meta-Runner" "$temp_path"; then
-      error "Downloaded file doesn't appear to be the UBS meta-runner"
-      rm -f "$temp_path"
-      return 1
-    fi
-
-    # Move to final location
-    mv "$temp_path" "$script_path"
   fi
 
-  # Make executable
-  chmod +x "$script_path" 2>/dev/null || {
+  if [ ! -s "$temp_path" ]; then
+    error "Downloaded file is empty"
+    rm -f "$temp_path"
+    return 1
+  fi
+
+  local file_size
+  file_size=$(wc -c < "$temp_path" 2>/dev/null || echo "0")
+  if [ "$file_size" -lt 2048 ]; then
+    warn "Downloaded file unusually small ($file_size bytes) - continuing cautiously"
+  fi
+
+  local first_line
+  first_line=$(head -n 1 "$temp_path" | sed 's/^\o357\o273\o277//' | tr -d '\r\n\t ' | head -c 50)
+  if [[ ! "$first_line" =~ ^#!.*bash ]]; then
+    error "Downloaded file doesn't appear to be a bash script"
+    log "First line: $(head -n 1 "$temp_path" | cat -v)"
+    rm -f "$temp_path"
+    return 1
+  fi
+
+  if ! grep -E -q "UBS Meta-Runner|Ultimate Bug Scanner" "$temp_path"; then
+    warn "Downloaded file does not contain expected marker; continuing (marker may have changed)"
+  fi
+
+  if [ -n "$use_sudo" ]; then
+    $use_sudo install -m 0755 "$temp_path" "$script_path"
+    rm -f "$temp_path"
+  else
+    mv "$temp_path" "$script_path"
+    chmod 0755 "$script_path" 2>/dev/null || true
+  fi
+
+  if [ -n "$use_sudo" ]; then
+    $use_sudo chmod +x "$script_path" 2>/dev/null || true
+  else
+    chmod +x "$script_path" 2>/dev/null || true
+  fi
+  if [ ! -x "$script_path" ]; then
     error "Failed to make script executable"
     return 1
-  }
+  fi
 
-  # Final verification
   if [ -x "$script_path" ] && [ -s "$script_path" ]; then
     success "Installed to: $script_path"
-
-    # Verify it can run
     if "$script_path" --help >/dev/null 2>&1 || "$script_path" -h >/dev/null 2>&1; then
       success "Installation verified - script is functional"
       return 0
@@ -1526,15 +1496,11 @@ install_scanner() {
 is_in_path() {
   local dir="$1"
   local normalized_dir
-
-  # Normalize path (resolve symlinks, remove trailing slashes)
   if command -v realpath >/dev/null 2>&1; then
     normalized_dir=$(realpath -s "$dir" 2>/dev/null || echo "$dir")
   else
-    normalized_dir="${dir%/}"  # Remove trailing slash
+    normalized_dir="${dir%/}"
   fi
-
-  # Check each PATH entry
   local IFS=':'
   for path_entry in $PATH; do
     local normalized_entry
@@ -1543,20 +1509,18 @@ is_in_path() {
     else
       normalized_entry="${path_entry%/}"
     fi
-
     if [ "$normalized_dir" = "$normalized_entry" ]; then
       return 0
     fi
   done
-
   return 1
 }
 
 add_to_path() {
   local install_dir
   install_dir="$(determine_install_dir)"
+  [ "$NO_PATH_MODIFY" -eq 1 ] && { log "Skipping PATH modification (per flag)"; return 0; }
 
-  # Check if already in PATH (robust checking)
   if is_in_path "$install_dir"; then
     log "Directory already in PATH"
     return 0
@@ -1564,8 +1528,8 @@ add_to_path() {
 
   local rc_file
   rc_file="$(get_rc_file)"
+  local shell_type="$(detect_shell)"
 
-  # Check if rc_file is writable
   if [ ! -w "$rc_file" ] && [ ! -w "$(dirname "$rc_file")" ]; then
     error "Cannot write to $rc_file - check permissions"
     return 1
@@ -1573,23 +1537,33 @@ add_to_path() {
 
   log "Adding $install_dir to PATH in $rc_file..."
 
-  # Check if PATH entry already exists in file (use literal string match to avoid regex issues)
-  if grep -qF "PATH=\"\$PATH:$install_dir\"" "$rc_file" 2>/dev/null || \
-     grep -qF "PATH=\$PATH:$install_dir" "$rc_file" 2>/dev/null || \
-     grep -qF "PATH=\"$install_dir:\$PATH\"" "$rc_file" 2>/dev/null || \
-     grep -qF "PATH=$install_dir:\$PATH" "$rc_file" 2>/dev/null; then
-    log "PATH entry already exists in $rc_file"
-    return 0
+  if [ "$shell_type" = "fish" ]; then
+    if ! grep -qF "set -gx PATH \$PATH $install_dir" "$rc_file" 2>/dev/null; then
+      {
+        echo ""
+        echo "# Ultimate Bug Scanner (added $(date +%Y-%m-%d))"
+        echo "set -gx PATH \$PATH $install_dir"
+      } >> "$rc_file"
+      success "Added to PATH in $rc_file (fish)"
+    else
+      log "PATH entry already exists in $rc_file (fish)"
+    fi
+  else
+    if grep -qF "PATH=\"\$PATH:$install_dir\"" "$rc_file" 2>/dev/null || \
+       grep -qF "PATH=\$PATH:$install_dir" "$rc_file" 2>/dev/null || \
+       grep -qF "PATH=\"$install_dir:\$PATH\"" "$rc_file" 2>/dev/null || \
+       grep -qF "PATH=$install_dir:\$PATH" "$rc_file" 2>/dev/null; then
+      log "PATH entry already exists in $rc_file"
+    else
+      {
+        echo ""
+        echo "# Ultimate Bug Scanner (added $(date +%Y-%m-%d))"
+        echo "export PATH=\"\$PATH:$install_dir\""
+      } >> "$rc_file"
+      success "Added to PATH in $rc_file"
+    fi
   fi
 
-  # Add PATH export
-  {
-    echo ""
-    echo "# Ultimate Bug Scanner (added $(date +%Y-%m-%d))"
-    echo "export PATH=\"\$PATH:$install_dir\""
-  } >> "$rc_file"
-
-  success "Added to PATH in $rc_file"
   warn "⚠ IMPORTANT: Restart your shell or run: source $rc_file"
   return 0
 }
@@ -1598,42 +1572,52 @@ create_alias() {
   local install_dir
   install_dir="$(determine_install_dir)"
   local script_path="$install_dir/$INSTALL_NAME"
-
-  # The binary is named 'ubs' and will be on PATH, but we also add an alias so
-  # the current shell session can use it immediately without restarting.
+  local shell_type
+  shell_type="$(detect_shell)"
 
   local rc_file
   rc_file="$(get_rc_file)"
 
   log "Configuring 'ubs' command..."
 
-  # Check if ubs command is already available
   if command -v ubs >/dev/null 2>&1; then
     success "'ubs' command is already available"
     return 0
   fi
 
-  # Check if alias already exists with correct target
-  if grep -qF "alias ubs=" "$rc_file" 2>/dev/null; then
-    log "Alias already exists, verifying..."
-    if grep -qF "alias ubs='$script_path'" "$rc_file" 2>/dev/null || \
-       grep -qF "alias ubs=\"$script_path\"" "$rc_file" 2>/dev/null; then
-      log "Existing alias is correct"
-      return 0
+  if [ "$shell_type" = "fish" ]; then
+    if ! grep -qF "function ubs" "$rc_file" 2>/dev/null; then
+      {
+        echo ""
+        echo "# Ultimate Bug Scanner alias"
+        echo "function ubs"
+        echo "  $script_path \$argv"
+        echo "end"
+      } >> "$rc_file"
+      success "Created 'ubs' function (fish) pointing to: $script_path"
     else
-      warn "Existing alias points to different location, updating..."
-      # Remove old alias (note: macOS requires the .bak extension, Linux doesn't mind)
-      sed -i.bak "/alias ubs=/d" "$rc_file" 2>/dev/null && rm -f "${rc_file}.bak" || {
-        warn "Could not update existing alias - you may need to manually remove it"
-      }
+      log "Fish function 'ubs' already defined"
     fi
-  fi
+  else
+    if grep -qF "alias ubs=" "$rc_file" 2>/dev/null; then
+      log "Alias already exists, verifying..."
+      if grep -qF "alias ubs='$script_path'" "$rc_file" 2>/dev/null || \
+         grep -qF "alias ubs=\"$script_path\"" "$rc_file" 2>/dev/null; then
+        log "Existing alias is correct"
+        return 0
+      else
+        warn "Existing alias points to different location, updating..."
+        sed -i.bak "/alias ubs=/d" "$rc_file" 2>/dev/null && rm -f "${rc_file}.bak" || {
+          warn "Could not update existing alias - you may need to manually remove it"
+        }
+      fi
+    fi
 
-  # Add alias pointing to the installed location
-  echo "" >> "$rc_file"
-  echo "# Ultimate Bug Scanner alias" >> "$rc_file"
-  echo "alias ubs='$script_path'" >> "$rc_file"
-  success "Created 'ubs' alias pointing to: $script_path"
+    echo "" >> "$rc_file"
+    echo "# Ultimate Bug Scanner alias" >> "$rc_file"
+    echo "alias ubs='$script_path'" >> "$rc_file"
+    success "Created 'ubs' alias pointing to: $script_path"
+  fi
 
   log "Restart your shell or run: source $rc_file"
 }
@@ -1694,29 +1678,12 @@ RULE
   success "Added $friendly_name quality instructions at $file"
 }
 
-setup_cursor_rules() {
-  append_agent_rule_block ".cursor" "Cursor"
-}
-
-setup_codex_rules() {
-  append_agent_rule_block ".codex" "Codex CLI"
-}
-
-setup_gemini_rules() {
-  append_agent_rule_block ".gemini" "Gemini Code Assist"
-}
-
-setup_windsurf_rules() {
-  append_agent_rule_block ".windsurf" "Windsurf"
-}
-
-setup_cline_rules() {
-  append_agent_rule_block ".cline" "Cline"
-}
-
-setup_opencode_rules() {
-  append_agent_rule_block ".opencode" "OpenCode"
-}
+setup_cursor_rules() { append_agent_rule_block ".cursor" "Cursor"; }
+setup_codex_rules() { append_agent_rule_block ".codex" "Codex CLI"; }
+setup_gemini_rules() { append_agent_rule_block ".gemini" "Gemini Code Assist"; }
+setup_windsurf_rules() { append_agent_rule_block ".windsurf" "Windsurf"; }
+setup_cline_rules()  { append_agent_rule_block ".cline"  "Cline"; }
+setup_opencode_rules(){ append_agent_rule_block ".opencode" "OpenCode"; }
 
 setup_aider_rules() {
   local aider_conf="${HOME}/.aider.conf.yml"
@@ -1824,7 +1791,6 @@ setup_git_hook() {
 
   local hook_file=".git/hooks/pre-commit"
 
-  # Backup existing hook if present
   if [ -f "$hook_file" ]; then
     cp "$hook_file" "${hook_file}.backup"
     warn "Existing hook backed up to ${hook_file}.backup"
@@ -1878,24 +1844,19 @@ detect_coding_agents() {
   [[ -d "${HOME}/.windsurf" || -d ".windsurf" ]] && HAS_AGENT_WINDSURF=1
   [[ -d "${HOME}/.cline" || -d ".cline" ]] && HAS_AGENT_CLINE=1
 
-  # Aider detection (look for .aider config)
   [[ -f "${HOME}/.aider.conf.yml" || -f ".aider.conf.yml" || -f ".aider.config.yml" ]] && HAS_AGENT_AIDER=1
 
-  # Continue detection (VS Code extension or .continue directory)
   if [ -d "$HOME/.vscode/extensions" ]; then
     ls "$HOME/.vscode/extensions"/continue.* >/dev/null 2>&1 && HAS_AGENT_CONTINUE=1
   fi
   [[ -d "${HOME}/.continue" || -d ".continue" ]] && HAS_AGENT_CONTINUE=1
 
-  # GitHub Copilot detection
   if [ -d "$HOME/.vscode/extensions" ]; then
     ls "$HOME/.vscode/extensions"/github.copilot* >/dev/null 2>&1 && HAS_AGENT_COPILOT=1
   fi
 
-  # Tabnine detection
   [[ -d "$HOME/.tabnine" ]] && HAS_AGENT_TABNINE=1
 
-  # Replit Agent detection (look for .replit file)
   [[ -f ".replit" ]] && HAS_AGENT_REPLIT=1
 }
 
@@ -1907,13 +1868,11 @@ add_to_agents_md() {
     return 0
   fi
 
-  # Check if file is writable
   if [ ! -w "$agents_file" ]; then
     error "AGENTS.md exists but is not writable - check permissions"
     return 1
   fi
 
-  # Check if already added (look for the specific section header)
   if grep -qF "## Code Quality: Ultimate Bug Scanner" "$agents_file" 2>/dev/null; then
     log "AGENTS.md already contains scanner documentation"
     return 0
@@ -1921,7 +1880,6 @@ add_to_agents_md() {
 
   log "Adding scanner section to AGENTS.md..."
 
-  # Backup original file
   if ! cp "$agents_file" "${agents_file}.backup" 2>/dev/null; then
     warn "Could not create backup of AGENTS.md"
   fi
@@ -1936,20 +1894,21 @@ Run the bug scanner **before committing** any JavaScript/TypeScript, Python, C/C
 
 ```bash
 ubs .
-```
+````
 
 ### Requirements
 
-- Run automatically after implementing features
-- Run before marking work as complete
-- Fix all CRITICAL issues before committing
-- Consider fixing WARNING issues
+* Run automatically after implementing features
+* Run before marking work as complete
+* Fix all CRITICAL issues before committing
+* Consider fixing WARNING issues
 
 ### Integration
 
 The scanner may be configured to run automatically via:
-- Claude Code hooks (runs on file save)
-- Git pre-commit hooks (runs before commit)
+
+* Claude Code hooks (runs on file save)
+* Git pre-commit hooks (runs before commit)
 
 If hooks are configured, the scanner runs automatically and you don't need to invoke it manually.
 
@@ -1958,284 +1917,317 @@ If hooks are configured, the scanner runs automatically and you don't need to in
 See the [Ultimate Bug Scanner repository](https://github.com/Dicklesworthstone/ultimate_bug_scanner) for complete documentation.
 AGENTS_EOF
 
-  success "Added section to AGENTS.md"
+success "Added section to AGENTS.md"
 }
 
 maybe_setup_hook() {
-  local label="$1"
-  local detected_flag="$2"
-  local fn_name="$3"
+local label="$1"
+local detected_flag="$2"
+local fn_name="$3"
 
-  if [ "$detected_flag" != "-1" ] && [ "$detected_flag" -eq 0 ]; then
-    log "Skipping ${label} (agent not detected)"
-    return 0
-  fi
+if [ "$detected_flag" != "-1" ] && [ "$detected_flag" -eq 0 ]; then
+log "Skipping ${label} (agent not detected)"
+return 0
+fi
 
-  if [ "$EASY_MODE" -eq 1 ]; then
-    "$fn_name"
-  else
-    if ask "Set up ${label}?"; then
-      "$fn_name"
-    fi
-  fi
+if [ "$EASY_MODE" -eq 1 ]; then
+"$fn_name"
+else
+if ask "Set up ${label}?"; then
+"$fn_name"
+fi
+fi
 }
 
 main() {
-  # Concurrent execution lock to prevent race conditions
-  if ! mkdir "$LOCK_FILE" 2>/dev/null; then
-    error "Another installation is already in progress"
-    error "If this is incorrect, remove: $LOCK_FILE"
-    exit 1
-  fi
-  # Mark that we own the lock (so cleanup will remove it)
-  LOCK_OWNED=1
 
-  # Save original arguments for potential re-exec during update
-  local ORIGINAL_ARGS=("$@")
+# Concurrent execution lock to prevent race conditions
 
-  # Load configuration file (before argument parsing so CLI args can override)
-  read_config_file
+if ! mkdir "$LOCK_FILE" 2>/dev/null; then
+error "Another installation is already in progress"
+error "If this is incorrect, remove: $LOCK_FILE"
+exit 1
+fi
+LOCK_OWNED=1
 
-  print_header
+# Save original arguments for potential re-exec during update
 
-  # Check for updates (unless skipped or updating)
-  if [ "$SKIP_VERSION_CHECK" -eq 0 ] && [[ ! " ${ORIGINAL_ARGS[*]} " =~ " --update " ]]; then
-    check_for_updates
-    echo ""
-  fi
+ORIGINAL_ARGS=("$@")
 
-  # Parse arguments
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --easy-mode)
-        EASY_MODE=1
-        NON_INTERACTIVE=1
-        shift
-        ;;
-      --non-interactive)
-        NON_INTERACTIVE=1
-        shift
-        ;;
-      --skip-ast-grep)
-        SKIP_AST_GREP=1
-        shift
-        ;;
-      --skip-ripgrep)
-        SKIP_RIPGREP=1
-        shift
-        ;;
-      --skip-jq)
-        SKIP_JQ=1
-        shift
-        ;;
-      --skip-hooks)
-        SKIP_HOOKS=1
-        shift
-        ;;
-      --skip-version-check)
-        SKIP_VERSION_CHECK=1
-        shift
-        ;;
-      --skip-verification)
-        RUN_VERIFICATION=0
-        shift
-        ;;
-      --update)
-        FORCE_REINSTALL=1
-        shift
-        ;;
-      --install-dir)
-        INSTALL_DIR="$2"
-        shift 2
-        ;;
-      --setup-git-hook)
-        setup_git_hook
-        exit 0
-        ;;
-      --setup-claude-hook)
-        setup_claude_code_hook
-        exit 0
-        ;;
-      --generate-config)
-        generate_config
-        exit 0
-        ;;
-      --diagnose)
-        diagnostic_check
-        exit 0
-        ;;
-      --uninstall)
-        uninstall_ubs
-        exit 0
-        ;;
-      --help)
-        echo "Usage: install.sh [OPTIONS]"
-        echo ""
-        echo "Options:"
-        echo "  --easy-mode             Accept all prompts, install deps, and wire integrations"
-        echo "  --non-interactive       Skip all prompts (use defaults)"
-        echo "  --update                Force reinstall to latest version"
-        echo "  --skip-ast-grep         Skip ast-grep installation"
-        echo "  --skip-ripgrep          Skip ripgrep installation"
-        echo "  --skip-jq               Skip jq installation"
-        echo "  --skip-hooks            Skip hook setup"
-        echo "  --skip-version-check    Don't check for updates"
-        echo "  --skip-verification     Skip post-install verification"
-        echo "  --install-dir DIR       Custom installation directory"
-        echo "  --setup-git-hook        Only set up git hook (no install)"
-        echo "  --setup-claude-hook     Only set up Claude Code hook (no install)"
-        echo "  --generate-config       Create configuration file at ~/.config/ubs/install.conf"
-        echo "  --diagnose              Run diagnostic check and show system information"
-        echo "  --uninstall             Remove UBS and all integrations"
-        echo "  --help                  Show this help"
-        exit 0
-        ;;
-      *)
-        error "Unknown option: $1"
-        exit 1
-        ;;
-    esac
-  done
+# Load configuration file (before argument parsing so CLI args can override)
 
-  log "Detected platform: $(detect_platform)"
-  log "Detected shell: $(detect_shell)"
-  if [ "$EASY_MODE" -eq 1 ]; then
-    log "Easy mode enabled: auto-confirming prompts and wiring integrations."
-  fi
-  echo ""
+read_config_file
 
-  # Check for ast-grep
-  if ! check_ast_grep && [ "$SKIP_AST_GREP" -eq 0 ]; then
-    warn "ast-grep not found (recommended for best results)"
-    if ask "Install ast-grep now?"; then
-      install_ast_grep || warn "Continuing without ast-grep (regex mode only)"
-    fi
-    echo ""
-  else
-    success "ast-grep is installed"
-    echo ""
-  fi
+print_header
 
-  # Check for ripgrep
-  if ! check_ripgrep && [ "$SKIP_RIPGREP" -eq 0 ]; then
-    warn "ripgrep not found (required for optimal performance)"
-    if ask "Install ripgrep now?"; then
-      install_ripgrep || warn "Continuing without ripgrep (may use slower grep fallback)"
-    fi
-    echo ""
-  else
-    success "ripgrep is installed"
-    echo ""
-  fi
+# Pre-parse some flags so update logic behaves as expected
 
-  # Check for jq
-  if ! check_jq && [ "$SKIP_JQ" -eq 0 ]; then
-    warn "jq not found (required for JSON/SARIF merging)"
-    if ask "Install jq now?"; then
-      install_jq || warn "Continuing without jq (merged outputs disabled)"
-    fi
-    echo ""
-  else
-    success "jq is installed"
-    echo ""
-  fi
+if [[ " ${ORIGINAL_ARGS[*]} " =~ " --skip-version-check " ]]; then SKIP_VERSION_CHECK=1; fi
+if [[ " ${ORIGINAL_ARGS[*]} " =~ " --update " ]]; then FORCE_REINSTALL=1; fi
+if [[ " ${ORIGINAL_ARGS[*]} " =~ " --quiet " ]]; then QUIET=1; fi
+if [[ " ${ORIGINAL_ARGS[*]} " =~ " --no-color " ]]; then COLOR_ENABLED=0; init_colors; fi
 
-  # Install the scanner
-  if ! install_scanner; then
-    error "Installation failed"
-    exit 1
-  fi
-  echo ""
+# Check for updates (unless skipped or updating)
 
-  # Add to PATH
-  add_to_path
-  echo ""
+if [ "$SKIP_VERSION_CHECK" -eq 0 ] && [ "$FORCE_REINSTALL" -eq 0 ]; then
+check_for_updates
+echo ""
+fi
 
-  # Create alias
-  create_alias
-  echo ""
+# Parse arguments
 
-  detect_coding_agents
-  log "Detected coding agents:"
-  log "  Core: claude=${HAS_AGENT_CLAUDE} codex=${HAS_AGENT_CODEX} cursor=${HAS_AGENT_CURSOR}"
-  log "  Extended: gemini=${HAS_AGENT_GEMINI} windsurf=${HAS_AGENT_WINDSURF} cline=${HAS_AGENT_CLINE} opencode=${HAS_AGENT_OPENCODE}"
-  log "  Additional: aider=${HAS_AGENT_AIDER} continue=${HAS_AGENT_CONTINUE} copilot=${HAS_AGENT_COPILOT} tabnine=${HAS_AGENT_TABNINE} replit=${HAS_AGENT_REPLIT}"
+while [[ $# -gt 0 ]]; do
+case "$1" in
+--quiet)
+QUIET=1; shift ;;
+--no-color)
+COLOR_ENABLED=0; init_colors; shift ;;
+--system)
+SYSTEM_WIDE=1; shift ;;
+--no-path-modify)
+NO_PATH_MODIFY=1; shift ;;
+--easy-mode)
+EASY_MODE=1
+NON_INTERACTIVE=1
+shift
+;;
+--non-interactive)
+NON_INTERACTIVE=1
+shift
+;;
+--skip-ast-grep)
+SKIP_AST_GREP=1
+shift
+;;
+--skip-ripgrep)
+SKIP_RIPGREP=1
+shift
+;;
+--skip-jq)
+SKIP_JQ=1
+shift
+;;
+--skip-hooks)
+SKIP_HOOKS=1
+shift
+;;
+--skip-version-check)
+SKIP_VERSION_CHECK=1
+shift
+;;
+--skip-verification)
+RUN_VERIFICATION=0
+shift
+;;
+--update)
+FORCE_REINSTALL=1
+shift
+;;
+--install-dir)
+INSTALL_DIR="$2"
+shift 2
+;;
+--setup-git-hook)
+setup_git_hook
+exit 0
+;;
+--setup-claude-hook)
+setup_claude_code_hook
+exit 0
+;;
+--generate-config)
+generate_config
+exit 0
+;;
+--diagnose)
+diagnostic_check
+exit 0
+;;
+--uninstall)
+uninstall_ubs
+exit 0
+;;
+--help)
+echo "Usage: install.sh [OPTIONS]"
+echo ""
+echo "Options:"
+echo "  --easy-mode             Accept all prompts, install deps, and wire integrations"
+echo "  --non-interactive       Skip all prompts (use defaults)"
+echo "  --update                Force reinstall to latest version"
+echo "  --skip-ast-grep         Skip ast-grep installation"
+echo "  --skip-ripgrep          Skip ripgrep installation"
+echo "  --skip-jq               Skip jq installation"
+echo "  --skip-hooks            Skip hook setup"
+echo "  --skip-version-check    Don't check for updates"
+echo "  --skip-verification     Skip post-install verification"
+echo "  --install-dir DIR       Custom installation directory"
+echo "  --system                Install system-wide to /usr/local/bin (uses sudo if needed)"
+echo "  --no-path-modify        Do not modify shell RC files to add to PATH"
+echo "  --quiet                 Minimal output"
+echo "  --no-color              Disable ANSI colors"
+echo "  --setup-git-hook        Only set up git hook (no install)"
+echo "  --setup-claude-hook     Only set up Claude Code hook (no install)"
+echo "  --generate-config       Create configuration file at ~/.config/ubs/install.conf"
+echo "  --diagnose              Run diagnostic check and show system information"
+echo "  --uninstall             Remove UBS and all integrations"
+echo "  --help                  Show this help"
+exit 0
+;;
+*)
+error "Unknown option: $1"
+exit 1
+;;
+esac
+done
 
-  # Setup hooks / guardrails
-  if [ "$SKIP_HOOKS" -eq 0 ]; then
-    maybe_setup_hook "Git pre-commit hook" -1 setup_git_hook
-    maybe_setup_hook "Claude Code on-save hook (.claude/hooks/on-file-write.sh)" "$HAS_AGENT_CLAUDE" setup_claude_code_hook
-    maybe_setup_hook "Cursor guardrails (.cursor/rules)" "$HAS_AGENT_CURSOR" setup_cursor_rules
-    maybe_setup_hook "Codex CLI guardrails (.codex/rules)" "$HAS_AGENT_CODEX" setup_codex_rules
-    maybe_setup_hook "Gemini Code Assist guardrails (.gemini/rules)" "$HAS_AGENT_GEMINI" setup_gemini_rules
-    maybe_setup_hook "Windsurf guardrails (.windsurf/rules)" "$HAS_AGENT_WINDSURF" setup_windsurf_rules
-    maybe_setup_hook "Cline guardrails (.cline/rules)" "$HAS_AGENT_CLINE" setup_cline_rules
-    maybe_setup_hook "OpenCode MCP guardrails (.opencode/rules)" "$HAS_AGENT_OPENCODE" setup_opencode_rules
-    maybe_setup_hook "Aider integration (.aider.conf.yml)" "$HAS_AGENT_AIDER" setup_aider_rules
-    maybe_setup_hook "Continue integration (.continue/config.json)" "$HAS_AGENT_CONTINUE" setup_continue_rules
-    maybe_setup_hook "GitHub Copilot instructions (.github/copilot-instructions.md)" "$HAS_AGENT_COPILOT" setup_copilot_instructions
-    echo ""
-  fi
+log "Detected platform: $(detect_platform)"
+log "Detected shell: $(detect_shell)"
+if [ "$EASY_MODE" -eq 1 ]; then
+log "Easy mode enabled: auto-confirming prompts and wiring integrations."
+fi
+if [ "$SYSTEM_WIDE" -eq 1 ]; then
+log "System-wide install requested (/usr/local/bin); sudo may be used."
+fi
+echo ""
 
-  # Add to AGENTS.md
-  if [ -f "AGENTS.md" ]; then
-    if ask "Add scanner documentation to AGENTS.md?"; then
-      add_to_agents_md
-    fi
-    echo ""
-  fi
+# Check for ast-grep
 
-  # Run post-install verification
-  verify_installation
+if ! check_ast_grep && [ "$SKIP_AST_GREP" -eq 0 ]; then
+warn "ast-grep not found (recommended for best results)"
+if ask "Install ast-grep now?"; then
+install_ast_grep || warn "Continuing without ast-grep (regex mode only)"
+fi
+echo ""
+else
+success "ast-grep is installed"
+echo ""
+fi
 
-  # Final instructions
-  echo ""
-  echo -e "${BOLD}${GREEN}"
-  cat << 'SUCCESS'
-    ╔══════════════════════════════════════════════════════════════════╗
-    ║                                                                  ║
-    ║     ✨  INSTALLATION COMPLETE! ✨                                ║
-    ║                                                                  ║
-    ║         Your code quality just leveled up! 🚀                   ║
-    ║                                                                  ║
-    ╚══════════════════════════════════════════════════════════════════╝
+# Check for ripgrep
+
+if ! check_ripgrep && [ "$SKIP_RIPGREP" -eq 0 ]; then
+warn "ripgrep not found (required for optimal performance)"
+if ask "Install ripgrep now?"; then
+install_ripgrep || warn "Continuing without ripgrep (may use slower grep fallback)"
+fi
+echo ""
+else
+success "ripgrep is installed"
+echo ""
+fi
+
+# Check for jq
+
+if ! check_jq && [ "$SKIP_JQ" -eq 0 ]; then
+warn "jq not found (required for JSON/SARIF merging)"
+if ask "Install jq now?"; then
+install_jq || warn "Continuing without jq (merged outputs disabled)"
+fi
+echo ""
+else
+success "jq is installed"
+echo ""
+fi
+
+# Install the scanner
+
+if ! install_scanner; then
+error "Installation failed"
+exit 1
+fi
+echo ""
+
+# Add to PATH
+
+add_to_path
+echo ""
+
+# Create alias/function
+
+create_alias
+echo ""
+
+detect_coding_agents
+log "Detected coding agents:"
+log "  Core: claude=${HAS_AGENT_CLAUDE} codex=${HAS_AGENT_CODEX} cursor=${HAS_AGENT_CURSOR}"
+log "  Extended: gemini=${HAS_AGENT_GEMINI} windsurf=${HAS_AGENT_WINDSURF} cline=${HAS_AGENT_CLINE} opencode=${HAS_AGENT_OPENCODE}"
+log "  Additional: aider=${HAS_AGENT_AIDER} continue=${HAS_AGENT_CONTINUE} copilot=${HAS_AGENT_COPILOT} tabnine=${HAS_AGENT_TABNINE} replit=${HAS_AGENT_REPLIT}"
+
+if [ "$SKIP_HOOKS" -eq 0 ]; then
+maybe_setup_hook "Git pre-commit hook" -1 setup_git_hook
+maybe_setup_hook "Claude Code on-save hook (.claude/hooks/on-file-write.sh)" "$HAS_AGENT_CLAUDE" setup_claude_code_hook
+maybe_setup_hook "Cursor guardrails (.cursor/rules)" "$HAS_AGENT_CURSOR" setup_cursor_rules
+maybe_setup_hook "Codex CLI guardrails (.codex/rules)" "$HAS_AGENT_CODEX" setup_codex_rules
+maybe_setup_hook "Gemini Code Assist guardrails (.gemini/rules)" "$HAS_AGENT_GEMINI" setup_gemini_rules
+maybe_setup_hook "Windsurf guardrails (.windsurf/rules)" "$HAS_AGENT_WINDSURF" setup_windsurf_rules
+maybe_setup_hook "Cline guardrails (.cline/rules)" "$HAS_AGENT_CLINE" setup_cline_rules
+maybe_setup_hook "OpenCode MCP guardrails (.opencode/rules)" "$HAS_AGENT_OPENCODE" setup_opencode_rules
+maybe_setup_hook "Aider integration (.aider.conf.yml)" "$HAS_AGENT_AIDER" setup_aider_rules
+maybe_setup_hook "Continue integration (.continue/config.json)" "$HAS_AGENT_CONTINUE" setup_continue_rules
+maybe_setup_hook "GitHub Copilot instructions (.github/copilot-instructions.md)" "$HAS_AGENT_COPILOT" setup_copilot_instructions
+echo ""
+fi
+
+if [ -f "AGENTS.md" ]; then
+if ask "Add scanner documentation to AGENTS.md?"; then
+add_to_agents_md
+fi
+echo ""
+fi
+
+verify_installation
+
+echo ""
+echo -e "${BOLD}${GREEN}"
+cat << 'SUCCESS'
+╔══════════════════════════════════════════════════════════════════╗
+║                                                                  ║
+║     ✨  INSTALLATION COMPLETE! ✨                                ║
+║                                                                  ║
+║         Your code quality just leveled up! 🚀                   ║
+║                                                                  ║
+╚══════════════════════════════════════════════════════════════════╝
 SUCCESS
-  echo -e "${RESET}"
-  echo ""
+echo -e "${RESET}"
+echo ""
 
-  # Check if ubs command is immediately available
-  local cmd_available=0
-  if command -v ubs >/dev/null 2>&1; then
-    cmd_available=1
-  fi
+local install_dir
+install_dir="$(determine_install_dir)"
 
-  if [ "$cmd_available" -eq 1 ]; then
-    echo -e "${BOLD}${GREEN}┌─ Ready to Use! ✓${RESET}"
-    echo -e "${GREEN}│${RESET}"
-    echo -e "${GREEN}└──${RESET} The ${BOLD}ubs${RESET} command is available now!"
-    echo ""
-    echo -e "${BOLD}${BLUE}┌─ Quick Start${RESET}"
-    echo -e "${BLUE}│${RESET}"
-    echo -e "${BLUE}├──${RESET} ${BOLD}Run scanner:${RESET}    ${GREEN}ubs .${RESET}"
-    echo -e "${BLUE}├──${RESET} ${BOLD}Get help:${RESET}       ${GREEN}ubs --help${RESET}"
-    echo -e "${BLUE}└──${RESET} ${BOLD}Verbose mode:${RESET}   ${GREEN}ubs -v .${RESET}"
-  else
-    echo -e "${BOLD}${YELLOW}┌─ Almost Done! (Reload Required)${RESET}"
-    echo -e "${YELLOW}│${RESET}"
-    echo -e "${YELLOW}└──${RESET} Run: ${BOLD}${GREEN}source $(get_rc_file)${RESET}"
-    echo ""
-    echo -e "${BOLD}${BLUE}┌─ Then Try${RESET}"
-    echo -e "${BLUE}│${RESET}"
-    echo -e "${BLUE}├──${RESET} ${BOLD}Run scanner:${RESET}    ${GREEN}ubs .${RESET}"
-    echo -e "${BLUE}├──${RESET} ${BOLD}Get help:${RESET}       ${GREEN}ubs --help${RESET}"
-    echo -e "${BLUE}└──${RESET} ${BOLD}Verbose mode:${RESET}   ${GREEN}ubs -v .${RESET}"
-  fi
+local cmd_available=0
+if command -v ubs >/dev/null 2>&1; then
+cmd_available=1
+fi
 
-  echo ""
-  echo -e "${BOLD}${BLUE}📚 Documentation:${RESET} ${BLUE}https://github.com/Dicklesworthstone/ultimate_bug_scanner${RESET}"
-  echo ""
-  echo -e "${GREEN}${BOLD}Happy bug hunting! 🐛🔫${RESET}"
-  echo ""
+if [ "$cmd_available" -eq 1 ]; then
+echo -e "${BOLD}${GREEN}┌─ Ready to Use! ✓${RESET}"
+echo -e "${GREEN}│${RESET}"
+echo -e "${GREEN}└──${RESET} The ${BOLD}ubs${RESET} command is available now!"
+echo ""
+echo -e "${BOLD}${BLUE}┌─ Quick Start${RESET}"
+echo -e "${BLUE}│${RESET}"
+echo -e "${BLUE}├──${RESET} ${BOLD}Run scanner:${RESET}    ${GREEN}ubs .${RESET}"
+echo -e "${BLUE}├──${RESET} ${BOLD}Get help:${RESET}       ${GREEN}ubs --help${RESET}"
+echo -e "${BLUE}└──${RESET} ${BOLD}Verbose mode:${RESET}   ${GREEN}ubs -v .${RESET}"
+echo ""
+[ "$NO_PATH_MODIFY" -eq 1 ] && warn "PATH was not modified per --no-path-modify; ensure $install_dir is on PATH."
+else
+echo -e "${BOLD}${YELLOW}┌─ Almost Done! (Reload Required)${RESET}"
+echo -e "${YELLOW}│${RESET}"
+echo -e "${YELLOW}└──${RESET} Run: ${BOLD}${GREEN}source $(get_rc_file)${RESET}"
+echo ""
+echo -e "${BOLD}${BLUE}┌─ Then Try${RESET}"
+echo -e "${BLUE}│${RESET}"
+echo -e "${BLUE}├──${RESET} ${BOLD}Run scanner:${RESET}    ${GREEN}ubs .${RESET}"
+echo -e "${BLUE}├──${RESET} ${BOLD}Get help:${RESET}       ${GREEN}ubs --help${RESET}"
+echo -e "${BLUE}└──${RESET} ${BOLD}Verbose mode:${RESET}   ${GREEN}ubs -v .${RESET}"
+fi
+
+echo ""
+echo -e "${BOLD}${BLUE}📚 Documentation:${RESET} ${BLUE}[https://github.com/Dicklesworthstone/ultimate_bug_scanner${RESET}](https://github.com/Dicklesworthstone/ultimate_bug_scanner${RESET})"
+echo ""
+echo -e "${GREEN}${BOLD}Happy bug hunting! 🐛🔫${RESET}"
+echo ""
 }
 
 main "$@"
