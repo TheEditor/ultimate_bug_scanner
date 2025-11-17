@@ -1004,6 +1004,10 @@ PY
 
 run_type_narrowing_checks() {
   print_subheader "Type narrowing validation"
+  if [[ "${UBS_SKIP_TYPE_NARROWING:-0}" -eq 1 ]]; then
+    print_finding "info" 0 "Type narrowing checks skipped" "Set UBS_SKIP_TYPE_NARROWING=0 or remove --skip-type-narrowing to re-enable"
+    return
+  fi
   local script_dir helper
   script_dir="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   helper="$script_dir/helpers/type_narrowing_ts.js"
