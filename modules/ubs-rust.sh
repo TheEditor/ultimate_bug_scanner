@@ -197,6 +197,24 @@ declare -A ASYNC_ERROR_SEVERITY=(
   [rust.async.tokio-task-no-await]='warning'
 )
 
+# Taint analysis metadata
+TAINT_RULE_IDS=(rust.taint.xss rust.taint.sql rust.taint.command)
+declare -A TAINT_SUMMARY=(
+  [rust.taint.xss]='User input flows into HttpResponse/body/output macros without escaping'
+  [rust.taint.sql]='User input concatenated into SQL statements/executions'
+  [rust.taint.command]='User input reaches std::process::Command'
+)
+declare -A TAINT_REMEDIATION=(
+  [rust.taint.xss]='Escape template context (html_escape::encode_safe, askama filters) before writing responses'
+  [rust.taint.sql]='Use parameterized queries (diesel/sqlx placeholders) instead of format! concatenation'
+  [rust.taint.command]='Validate / whitelist args and avoid shell invocation when spawning commands'
+)
+declare -A TAINT_SEVERITY=(
+  [rust.taint.xss]='critical'
+  [rust.taint.sql]='critical'
+  [rust.taint.command]='critical'
+)
+
 # Resource lifecycle correlation spec (acquire vs release pairs)
 RESOURCE_LIFECYCLE_IDS=(thread_join tokio_spawn tcp_shutdown)
 declare -A RESOURCE_LIFECYCLE_SEVERITY=(
