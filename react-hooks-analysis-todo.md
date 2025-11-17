@@ -20,5 +20,5 @@
 - [x] Run targeted manifest cases for new fixtures.
 
 ## Verification & Follow-up
-- [ ] Integrate helper invocation into README/docs if needed (mention capability).
+- [x] Integrate helper invocation into README/docs (added React Hooks bullet under capabilities).
 - [x] Update TODO as tasks complete and summarize in final report.
