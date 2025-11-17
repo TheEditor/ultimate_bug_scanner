@@ -1,5 +1,14 @@
 # Java UBS Samples
 
-- `BuggyService` exercises I/O, TLS, and deprecated thread APIs; `BuggyConcurrency` leaks executors.
-- Clean equivalents use try-with-resources, HTTPS, and explicit shutdown.
-- Run `ubs test-suite/java/buggy` vs `ubs test-suite/java/clean` for validation.
+| File | Focus |
+|------|-------|
+| `buggy/BuggyService.java` | Blocking I/O, TLS issues |
+| `buggy/BuggyConcurrency.java` | ExecutorService leaks, missing shutdown |
+| `buggy/ResourceLifecycle.java` | Streams not closed |
+| `buggy/BuggySecurity.java` | SQL/command injection |
+| Clean files | try-with-resources, prepared statements, ProcessBuilder argv |
+
+```bash
+ubs --only=java --fail-on-warning test-suite/java/buggy
+ubs --only=java test-suite/java/clean
+```

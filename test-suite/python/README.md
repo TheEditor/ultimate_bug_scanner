@@ -1,5 +1,16 @@
 # Python UBS Samples
 
-- `buggy/` includes intentionally vulnerable scripts covering security, resource leaks, and concurrency pitfalls.
-- `clean/` provides defensive counterparts for regression testing.
-- Use `ubs test-suite/python/buggy` and `ubs test-suite/python/clean` to validate the Python module.
+| File | Category | What UBS should flag |
+|------|----------|----------------------|
+| `buggy/buggy_async_security.py` | Async/await pitfalls + insecure requests | unguarded awaits, missing try/except, `verify=False` |
+| `buggy/resource_lifecycle.py` | File/task cleanup | missing `close()`/`cancel()` |
+| `buggy/security_injection.py` | Code & command injection, yaml.load, eval | eval/exec, yaml.load without Loader, shell=True |
+| `buggy/mutable_defaults.py` | Function scope issues | mutable defaults, swallowed exceptions, weak hash |
+| `clean/*.py` mirrors | Defensive patterns | safe YAML, parameterized SQL, integer cents |
+
+Run:
+
+```bash
+ubs --only=python --fail-on-warning test-suite/python/buggy
+ubs --only=python test-suite/python/clean
+```

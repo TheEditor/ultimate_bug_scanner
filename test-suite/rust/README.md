@@ -1,5 +1,15 @@
 # Rust UBS Samples
 
-- `buggy_unwrap.rs` and `async_block.rs` stress unwraps, unsafe blocks, and async misuse.
-- Clean variants demonstrate `Result` handling, TaskGroup style concurrency, and safe locking.
-- Execute `ubs test-suite/rust/buggy` vs `ubs test-suite/rust/clean` for validation.
+| File | Category |
+|------|----------|
+| `buggy/buggy_unwrap.rs` | Panic-prone unwrap chains |
+| `buggy/async_block.rs` | Spawned tasks never awaited |
+| `buggy/resource_lifecycle.rs` | Missing JoinHandle cleanup |
+| `buggy/security_injection.rs` | Command injection + exposed secrets |
+| `buggy/math_precision.rs` | Float equality for money |
+| Clean files (`clean/*.rs`) | `Result` handling, JoinHandle waiting, integer cents |
+
+```bash
+ubs --only=rust --fail-on-warning test-suite/rust/buggy
+ubs --only=rust test-suite/rust/clean
+```

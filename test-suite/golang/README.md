@@ -1,5 +1,15 @@
 # Go UBS Samples
 
-- Buggy fixtures: `buggy_http.go`, `buggy_concurrency.go` trigger TLS, exec, and WaitGroup alarms.
-- Clean fixtures ensure contexts are cancelled and http.Clients have timeouts.
-- Run `ubs test-suite/golang/buggy` vs `ubs test-suite/golang/clean`.
+| File | Category | Expected findings |
+|------|----------|-------------------|
+| `buggy/buggy_http.go` | HTTP client/server safety | missing timeouts, TLS defaults |
+| `buggy/buggy_concurrency.go` | Concurrency handling | goroutines ignoring errors, WaitGroup misuse |
+| `buggy/resource_lifecycle.go` | Resource lifecycle | context leaks, missing cancel() |
+| `buggy/security_sql.go` | SQL/command injection + http.Client default | string concatenated SQL, exec.Command("sh -c"), no timeout |
+| `buggy/performance.go` | Timers + defer in loops | `time.Tick` leaks, defer inside loop |
+| Clean counterparts | Defensive examples | context.WithTimeout, prepared statements, ticker.Stop |
+
+```bash
+ubs --only=golang --fail-on-warning test-suite/golang/buggy
+ubs --only=golang test-suite/golang/clean
+```
