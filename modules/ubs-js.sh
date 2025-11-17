@@ -69,6 +69,30 @@ declare -A ASYNC_ERROR_SEVERITY=(
   [js.async.promiseall-no-try]='warning'
 )
 
+# React hooks dependency metadata
+HOOKS_RULE_IDS=(js.hooks.no-deps js.hooks.missing-critical js.hooks.missing-warning js.hooks.unstable js.hooks.unused)
+declare -A HOOKS_SUMMARY=(
+  [js.hooks.no-deps]='React hook missing dependency array'
+  [js.hooks.missing-critical]='React hook dependency array missing props/context'
+  [js.hooks.missing-warning]='React hook dependency array missing local state/refs'
+  [js.hooks.unstable]='Dependency array contains unstable values that change every render'
+  [js.hooks.unused]='Dependency array includes unused entries'
+)
+declare -A HOOKS_REMEDIATION=(
+  [js.hooks.no-deps]='Provide a dependency array or intentionally document why it is omitted'
+  [js.hooks.missing-critical]='Add the referenced props/context values to the dependency array to avoid stale data'
+  [js.hooks.missing-warning]='Add local state/refs used inside the hook to its dependency array'
+  [js.hooks.unstable]='Memoize objects/functions placed in dependency arrays (useMemo/useCallback) to avoid infinite loops'
+  [js.hooks.unused]='Remove unused dependency entries to keep dependency arrays minimal and intentional'
+)
+declare -A HOOKS_SEVERITY=(
+  [js.hooks.no-deps]='warning'
+  [js.hooks.missing-critical]='critical'
+  [js.hooks.missing-warning]='warning'
+  [js.hooks.unstable]='critical'
+  [js.hooks.unused]='info'
+)
+
 # Resource lifecycle correlation spec (acquire vs release pairs)
 RESOURCE_LIFECYCLE_IDS=(dom_event interval observer)
 declare -A RESOURCE_LIFECYCLE_SEVERITY=(
@@ -407,6 +431,333 @@ PY
     print_finding "good" "All async operations appear protected"
   fi
 }
+run_hooks_dependency_checks() {
+  print_subheader "React hooks dependency analysis"
+  if [[ "$HAS_AST_GREP" -ne 1 ]]; then
+    print_finding "info" 0 "ast-grep not available" "Install ast-grep to analyze React hook dependencies"
+    return
+  fi
+  local rule_dir tmp_json
+  rule_dir="$(mktemp -d 2>/dev/null || mktemp -d -t js_hook_rules.XXXXXX)"
+  if [[ ! -d "$rule_dir" ]]; then
+    print_finding "info" 0 "temp dir creation failed" "Unable to stage React hook rules"
+    return
+  fi
+  cat >"$rule_dir/useEffect_with_deps.yml" <<'YAML'
+id: hooks.use-effect-with-deps
+language: javascript
+rule:
+  pattern: useEffect($CALLBACK, $DEPS)
+YAML
+  cat >"$rule_dir/useEffect_no_deps.yml" <<'YAML'
+id: hooks.use-effect-no-deps
+language: javascript
+rule:
+  pattern: useEffect($CALLBACK)
+YAML
+  cat >"$rule_dir/useLayoutEffect_with_deps.yml" <<'YAML'
+id: hooks.use-layout-with-deps
+language: javascript
+rule:
+  pattern: useLayoutEffect($CALLBACK, $DEPS)
+YAML
+  cat >"$rule_dir/useLayoutEffect_no_deps.yml" <<'YAML'
+id: hooks.use-layout-no-deps
+language: javascript
+rule:
+  pattern: useLayoutEffect($CALLBACK)
+YAML
+  cat >"$rule_dir/useCallback_with_deps.yml" <<'YAML'
+id: hooks.use-callback-with-deps
+language: javascript
+rule:
+  pattern: useCallback($CALLBACK, $DEPS)
+YAML
+  cat >"$rule_dir/useCallback_no_deps.yml" <<'YAML'
+id: hooks.use-callback-no-deps
+language: javascript
+rule:
+  pattern: useCallback($CALLBACK)
+YAML
+  cat >"$rule_dir/useMemo_with_deps.yml" <<'YAML'
+id: hooks.use-memo-with-deps
+language: javascript
+rule:
+  pattern: useMemo($CALLBACK, $DEPS)
+YAML
+  cat >"$rule_dir/useMemo_no_deps.yml" <<'YAML'
+id: hooks.use-memo-no-deps
+language: javascript
+rule:
+  pattern: useMemo($CALLBACK)
+YAML
+  tmp_json="$(mktemp 2>/dev/null || mktemp -t js_hook_matches.XXXXXX)"
+  : >"$tmp_json"
+  local rf
+  for rf in "$rule_dir"/*.yml; do
+    if ! "${AST_GREP_CMD[@]}" scan -r "$rf" "$PROJECT_DIR" --json=stream >>"$tmp_json" 2>/dev/null; then
+      continue
+    fi
+  done
+  rm -rf "$rule_dir"
+  if ! [[ -s "$tmp_json" ]]; then
+    rm -f "$tmp_json"
+    print_finding "good" "Hooks dependency arrays look accurate"
+    return
+  fi
+  local printed=0
+  while IFS=$'\t' read -r severity count summary desc samples; do
+    [[ -z "$severity" ]] && continue
+    printed=1
+    local message="$summary"
+    local detail="$desc"
+    if [[ -n "$samples" ]]; then
+      detail+=" (e.g., $samples)"
+    fi
+    print_finding "$severity" "$count" "$message" "$detail"
+  done < <(python3 - "$tmp_json" <<'PY'
+import json, sys, re
+from collections import defaultdict
+from pathlib import Path
+
+KEYWORDS = {
+    'const', 'let', 'var', 'return', 'if', 'else', 'switch', 'case', 'break', 'continue',
+    'for', 'while', 'do', 'class', 'function', 'async', 'await', 'default', 'new', 'typeof',
+    'try', 'catch', 'finally', 'throw', 'import', 'from', 'export', 'extends', 'super',
+    'true', 'false', 'null', 'undefined', 'NaN', 'Infinity'
+}
+BUILTINS = {
+    'console', 'Math', 'JSON', 'Number', 'String', 'Boolean', 'Promise', 'Date', 'window',
+    'document', 'fetch', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'log',
+    'apply'
+}
+STATE_PATTERN = re.compile(r"const\s*\[\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*([A-Za-z_][A-Za-z0-9_]*)\s*\]\s*=\s*useState", re.MULTILINE)
+REF_PATTERN = re.compile(r"const\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*useRef\(", re.MULTILINE)
+PROPS_FUNC_PATTERN = re.compile(r"function\s+[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\{([^}]*)\}\s*\)")
+ARROW_FUNC_PATTERN = re.compile(r"=\s*\(\s*\{([^}]*)\}\s*\)\s*=>")
+DESTRUCT_PROPS_PATTERN = re.compile(r"const\s*\{([^}]*)\}\s*=\s*props")
+
+STRING_RE = re.compile(r"(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)", re.S)
+file_cache = {}
+
+def parse_props(blob):
+    names = []
+    for raw in blob.split(','):
+        token = raw.strip()
+        if not token:
+            continue
+        name = token.split('=')[0].strip()
+        if not name:
+            continue
+        name = name.replace('*', '').strip()
+        if name:
+            names.append(name)
+    return names
+
+def get_file_symbols(path_str):
+    cached = file_cache.get(path_str)
+    if cached:
+        return cached
+    text = Path(path_str).read_text(encoding='utf-8')
+    state_vars, setters = set(), set()
+    for match in STATE_PATTERN.finditer(text):
+        state_vars.add(match.group(1))
+        setters.add(match.group(2))
+    ref_vars = {m.group(1) for m in REF_PATTERN.finditer(text)}
+    props = set()
+    for pattern in (PROPS_FUNC_PATTERN, ARROW_FUNC_PATTERN, DESTRUCT_PROPS_PATTERN):
+        for match in pattern.finditer(text):
+            props.update(parse_props(match.group(1)))
+    data = {'text': text, 'state': state_vars, 'setters': setters, 'props': props, 'refs': ref_vars}
+    file_cache[path_str] = data
+    return data
+
+def extract_params(callback_text):
+    header_end = callback_text.find('=>')
+    if header_end == -1:
+        return []
+    header = callback_text[:header_end].replace('async', '').strip()
+    if not header:
+        return []
+    if header.startswith('(') and header.endswith(')'):
+        header = header[1:-1]
+    params = []
+    for raw in header.split(','):
+        token = raw.strip()
+        if not token:
+            continue
+        name = token.split('=')[0].strip()
+        if name.startswith('{') and name.endswith('}'):
+            params.extend(parse_props(name[1:-1]))
+        elif name:
+            params.append(name)
+    return params
+
+def extract_locals(callback_text):
+    return {m.group(1) for m in re.finditer(r"(?:const|let|var|function)\s+([A-Za-z_][A-Za-z0-9_]*)", callback_text)}
+
+def strip_strings(text):
+    return STRING_RE.sub(' ', text)
+
+def extract_identifiers(callback_text):
+    cleaned = strip_strings(callback_text)
+    return set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", cleaned))
+
+def parse_deps(text):
+    text = text.strip()
+    if not (text.startswith('[') and text.endswith(']')):
+        return []
+    inner = text[1:-1]
+    out, buf, depth = [], [], 0
+    for ch in inner:
+        if ch == ',' and depth == 0:
+            token = ''.join(buf).strip()
+            if token:
+                out.append(token)
+            buf = []
+            continue
+        if ch in '([{':
+            depth += 1
+        elif ch in ')]}':
+            depth = max(depth - 1, 0)
+        buf.append(ch)
+    token = ''.join(buf).strip()
+    if token:
+        out.append(token)
+    return out
+
+def classify(name, symbols):
+    if name in symbols['props']:
+        return 'prop'
+    if name in symbols['state']:
+        return 'state'
+    if name in symbols['refs']:
+        return 'ref'
+    return 'other'
+
+def skip_name(name, symbols):
+    if name in symbols['setters']:
+        return True
+    if name in BUILTINS:
+        return True
+    if name.startswith('set') and len(name) > 3 and name[3].isupper():
+        return True
+    return False
+
+def is_literal(dep):
+    dep = dep.strip()
+    if not dep:
+        return True
+    if dep[0].isdigit() or dep[0] in '\"\'' or dep in {'true', 'false', 'null', 'undefined'}:
+        return True
+    return False
+
+def is_unstable(dep):
+    dep = dep.strip()
+    if not dep:
+        return False
+    if dep.startswith('{') and dep.endswith('}'):
+        return True
+    if dep.startswith('[') and dep.endswith(']'):
+        return True
+    if dep.startswith('(') and '=>' in dep:
+        return True
+    if dep.startswith('function'):
+        return True
+    return False
+
+def calc_line(text, start_line, name):
+    pattern = re.compile(rf"\\b{re.escape(name)}\\b")
+    for offset, line in enumerate(text.splitlines()):
+        if pattern.search(line):
+            return start_line + offset + 1
+    return start_line + 1
+
+def add_issue(store, severity, summary, desc, sample):
+    key = (severity, summary, desc)
+    info = store[key]
+    info['count'] += 1
+    if sample:
+        info['samples'].append(sample)
+
+def main():
+    issues = defaultdict(lambda: {'count': 0, 'samples': []})
+    with open(sys.argv[1], 'r', encoding='utf-8') as fh:
+        for raw in fh:
+            raw = raw.strip()
+            if not raw or raw == '[]':
+                continue
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            rule = data.get('ruleId') or data.get('rule_id') or ''
+            file_path = data.get('file')
+            if not rule or not file_path:
+                continue
+            symbols = get_file_symbols(file_path)
+            meta = (data.get('metaVariables') or {}).get('single', {})
+            callback_meta = meta.get('CALLBACK') or {}
+            deps_meta = meta.get('DEPS') or {}
+            callback = callback_meta.get('text', '')
+            deps_text = deps_meta.get('text', '')
+            callback_start = (callback_meta.get('range') or {}).get('start', {}).get('line', 0)
+            hook_start = (data.get('range') or {}).get('start', {}).get('line', 0)
+            if rule.endswith('no-deps'):
+                summary = "React hook missing dependency array"
+                desc = f"{rule.split('.')[-2]} is missing a dependency array"
+                sample = f"{file_path}:{hook_start + 1}"
+                add_issue(issues, 'warning', summary, desc, sample)
+                continue
+            deps = parse_deps(deps_text)
+            identifiers = extract_identifiers(callback)
+            identifiers -= KEYWORDS
+            identifiers -= BUILTINS
+            identifiers -= extract_locals(callback)
+            identifiers -= set(extract_params(callback))
+            for name in list(identifiers):
+                if skip_name(name, symbols) or is_literal(name):
+                    continue
+                if name not in deps:
+                    kind = classify(name, symbols)
+                    severity = 'critical' if kind == 'prop' else 'warning'
+                    summary = 'React hook dependency array missing props/context' if kind == 'prop' else 'React hook dependency array missing local state/refs'
+                    desc = f"Add {name} to the dependency array"
+                    sample = f"{file_path}:{calc_line(callback, callback_start, name)}:{name}"
+                    add_issue(issues, severity, summary, desc, sample)
+            unused = []
+            identifiers_lower = {n.strip() for n in identifiers}
+            for dep in deps:
+                dep_clean = dep.strip()
+                if not dep_clean or is_literal(dep_clean):
+                    continue
+                if dep_clean not in identifiers_lower:
+                    unused.append(dep_clean)
+                if is_unstable(dep_clean):
+                    summary = 'Dependency array contains unstable values'
+                    desc = f"{dep_clean} changes identity every render; memoize it"
+                    sample = f"{file_path}:{hook_start + 1}:{dep_clean}"
+                    add_issue(issues, 'critical', summary, desc, sample)
+            if unused:
+                summary = 'Dependency array includes unused entries'
+                desc = f"Unused dependencies: {', '.join(sorted(set(unused)))}"
+                sample = f"{file_path}:{hook_start + 1}"
+                add_issue(issues, 'info', summary, desc, sample)
+    for (severity, summary, desc), payload in issues.items():
+        samples = ','.join(payload['samples'][:3])
+        print(f"{severity}\t{payload['count']}\t{summary}\t{desc}\t{samples}")
+
+if __name__ == '__main__':
+    main()
+PY
+)
+  rm -f "$tmp_json"
+  if [[ $printed -eq 0 ]]; then
+    print_finding "good" "Hooks dependency arrays look accurate"
+  fi
+}
+
+
 
 # Temporarily relax pipefail for grep-heavy scans to avoid ERR on 1/no-match
 begin_scan_section(){
@@ -1043,8 +1394,10 @@ if [ "$count" -gt 10 ]; then
 fi
 
 print_subheader "Bitwise operations on non-integers"
-count=$(( $("${GREP_RN[@]}" -e "(^|[^<])<<([^<]|$)|(^|[^>])>>([^>]|$)|\&|\^" "$PROJECT_DIR" 2>/dev/null || true | \
-  grep -v -E "//|&&|\|\||/\*" || true | wc -l | awk '{print $1+0}') ))
+count=$("${GREP_RN[@]}" -e "(^|[^<])<<([^<]|$)|(^|[^>])>>([^>]|$)|\\&|\\^" "$PROJECT_DIR" 2>/dev/null \
+  | (grep -v -E "//|&&|\\|\\||/\\*" || true) \
+  | wc -l | awk '{print $1+0}')
+count=${count:-0}
 if [ "$count" -gt 0 ]; then
   print_finding "info" "$count" "Bitwise operations detected - ensure integer inputs"
 fi
@@ -1068,7 +1421,9 @@ elif [ "$count" -gt 0 ]; then
 fi
 
 print_subheader "Array.length used in arithmetic without validation"
-count=$(( $("${GREP_RN[@]}" -e "\.length[[:space:]]*[+\-/*]|[+\-/*][[:space:]]*[A-Za-z_]*\.length" "$PROJECT_DIR" 2>/dev/null || true | wc -l | awk '{print $1+0}') ))
+count=$("${GREP_RN[@]}" -e "\\.length[[:space:]]*[+\-/*]|[+\-/*][[:space:]]*[A-Za-z_]*\\.length" "$PROJECT_DIR" 2>/dev/null \
+  | wc -l | awk '{print $1+0}')
+count=${count:-0}
 if [ "$count" -gt 15 ]; then
   print_finding "info" "$count" "Array.length in calculations" "Ensure non-empty before indexing"
 fi
@@ -1105,8 +1460,10 @@ print_category "Detects: Loose equality, type confusion, implicit conversions" \
   "JavaScript's type coercion causes subtle bugs that are hard to debug"
 
 print_subheader "Loose equality (== instead of ===)"
-count=$(( $("${GREP_RN[@]}" -e "(^|[^=!<>])==($|[^=])|(^|[^=!<>])!=($|[^=])" "$PROJECT_DIR" 2>/dev/null || true | \
-  grep -vE "===|!==" || true | wc -l | awk '{print $1+0}') ))
+count=$("${GREP_RN[@]}" -e "(^|[^=!<>])==($|[^=])|(^|[^=!<>])!=($|[^=])" "$PROJECT_DIR" 2>/dev/null \
+  | (grep -vE "===|!==" || true) \
+  | wc -l | awk '{print $1+0}')
+count=${count:-0}
 if [ "$count" -gt 0 ]; then
   print_finding "critical" "$count" "Loose equality causes type coercion bugs" "Always prefer strict equality"
   show_detailed_finding "(^|[^=!<>])==($|[^=])|(^|[^=!<>])!=($|[^=])" 5
@@ -1192,6 +1549,7 @@ if [ "$count" -gt 0 ]; then
 fi
 
 run_async_error_checks
+run_hooks_dependency_checks
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
