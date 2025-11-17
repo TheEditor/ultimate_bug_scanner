@@ -1,6 +1,8 @@
 #include <array>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <string>
 
 void safeCopy(const std::string &input) {

@@ -1,10 +1,9 @@
-#include <boost/multiprecision/cpp_dec_float.hpp>
 #include <iostream>
 
 int main() {
-    boost::multiprecision::cpp_dec_float_50 money = 10;
-    boost::multiprecision::cpp_dec_float_50 price = 3;
-    auto change = money - price * 3;
-    std::cout << change << std::endl;
+    long long money_cents = 1000; // $10.00
+    long long price_cents = 375;  // $3.75
+    long long change = money_cents - price_cents * 2;
+    std::cout << change << " cents" << std::endl;
     return 0;
 }
