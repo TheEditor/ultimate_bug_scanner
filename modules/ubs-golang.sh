@@ -14,6 +14,7 @@
 # ═══════════════════════════════════════════════════════════════════════════
 
 set -Eeuo pipefail
+SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 shopt -s lastpipe
 shopt -s extglob
 
@@ -345,43 +346,34 @@ show_detailed_finding() {
 }
 
 run_resource_lifecycle_checks() {
-  local header_shown=0
-  local rid
-  for rid in "${RESOURCE_LIFECYCLE_IDS[@]}"; do
-    local acquire_regex="${RESOURCE_LIFECYCLE_ACQUIRE[$rid]:-}"
-    local release_regex="${RESOURCE_LIFECYCLE_RELEASE[$rid]:-}"
-    [[ -z "$acquire_regex" || -z "$release_regex" ]] && continue
-    local file_list
-    file_list=$("${GREP_RN[@]}" -e "$acquire_regex" "$PROJECT_DIR" 2>/dev/null | cut -d: -f1 | sort -u || true)
-    [[ -n "$file_list" ]] || continue
-    while IFS= read -r file; do
-      [[ -z "$file" ]] && continue
-      local acquire_hits release_hits
-      acquire_hits=$("${GREP_RN[@]}" -e "$acquire_regex" "$file" 2>/dev/null | count_lines || true)
-      release_hits=$("${GREP_RN[@]}" -e "$release_regex" "$file" 2>/dev/null | count_lines || true)
-      acquire_hits=${acquire_hits:-0}
-      release_hits=${release_hits:-0}
-      if (( acquire_hits > release_hits )); then
-        if [[ $header_shown -eq 0 ]]; then
-          print_subheader "Resource lifecycle correlation"
-          header_shown=1
-        fi
-        local delta=$((acquire_hits - release_hits))
-        local relpath=${file#"$PROJECT_DIR"/}
-        [[ "$relpath" == "$file" ]] && relpath="$file"
-        local summary="${RESOURCE_LIFECYCLE_SUMMARY[$rid]:-Resource imbalance}"
-        local remediation="${RESOURCE_LIFECYCLE_REMEDIATION[$rid]:-Ensure matching cleanup call}"
-        local severity="${RESOURCE_LIFECYCLE_SEVERITY[$rid]:-warning}"
-        local title="$summary [$relpath]"
-        local desc="$remediation (acquire=$acquire_hits, release=$release_hits)"
-        print_finding "$severity" "$delta" "$title" "$desc"
-      fi
-    done <<<"$file_list"
-  done
-  if [[ $header_shown -eq 0 ]]; then
-    print_subheader "Resource lifecycle correlation"
-    print_finding "good" "All tracked resource acquisitions have matching cleanups"
+  local helper="$SCRIPT_DIR/helpers/resource_lifecycle_go.go"
+  print_subheader "Resource lifecycle correlation"
+  if [[ ! -f "$helper" ]]; then
+    print_finding "info" 0 "Resource helper missing" "Expected $helper"
+    return
   fi
+  if ! command -v go >/dev/null 2>&1; then
+    print_finding "info" 0 "Go toolchain unavailable" "Install Go to run the AST helper"
+    return
+  fi
+  local output
+  if ! output=$(go run "$helper" -- "$PROJECT_DIR" 2>/dev/null); then
+    print_finding "info" 0 "AST helper failed" "See stderr for details"
+    return
+  fi
+  if [[ -z "$output" ]]; then
+    print_finding "good" "All tracked resource acquisitions have matching cleanups"
+    return
+  fi
+  while IFS=$'\t' read -r location kind message; do
+    [[ -z "$location" ]] && continue
+    local summary="${RESOURCE_LIFECYCLE_SUMMARY[$kind]:-Resource imbalance}"
+    local remediation="${RESOURCE_LIFECYCLE_REMEDIATION[$kind]:-Ensure matching cleanup call}"
+    local severity="${RESOURCE_LIFECYCLE_SEVERITY[$kind]:-warning}"
+    local desc="$remediation"
+    [[ -n "$message" ]] && desc="$message"
+    print_finding "$severity" 1 "$summary [$location]" "$desc"
+  done <<<"$output"
 }
 
 run_async_error_checks() {
