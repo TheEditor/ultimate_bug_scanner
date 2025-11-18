@@ -279,9 +279,21 @@ else
       --only=*) ONLY_LANGS="${1#*=}"; shift;;
       --exclude=*) EXCLUDE_LANGS="${1#*=}"; shift;;
       --category=*) CATEGORY_FILTER="${1#*=}"; shift;;
+      --category)
+        if [[ $# -lt 2 ]]; then usage; exit 2; fi
+        shift; CATEGORY_FILTER="$1"; shift;;
       --comparison=*) COMPARISON_FILE="${1#*=}"; SHAREABLE_MODE=1; SARIF_AUTOMATION_ID="ubs-comparison"; shift;;
+      --comparison)
+        if [[ $# -lt 2 ]]; then usage; exit 2; fi
+        shift; COMPARISON_FILE="$1"; SHAREABLE_MODE=1; SARIF_AUTOMATION_ID="ubs-comparison"; shift;;
       --report-json=*) REPORT_JSON_PATH="${1#*=}"; SHAREABLE_MODE=1; shift;;
+      --report-json)
+        if [[ $# -lt 2 ]]; then usage; exit 2; fi
+        shift; REPORT_JSON_PATH="$1"; SHAREABLE_MODE=1; shift;;
       --html-report=*) HTML_REPORT_PATH="${1#*=}"; SHAREABLE_MODE=1; shift;;
+      --html-report)
+        if [[ $# -lt 2 ]]; then usage; exit 2; fi
+        shift; HTML_REPORT_PATH="$1"; SHAREABLE_MODE=1; shift;;
       --ignore-file=*) IGNORE_FILE="${1#*=}"; shift;;
       --module-dir=*) MODULE_DIR="${1#*=}"; shift;;
       --module-dir)
@@ -708,10 +720,10 @@ detect_lang(){
     java)
       if need_cmd rg; then
         rg -q --hidden -g '!target/**' -g '!build/**' -g '!out/**' -g '!dist/**' \
-           -g '*.java' -g '*.kt' -g 'pom.xml' -g 'build.gradle' -g 'build.gradle.kts' -g 'settings.gradle' -g 'settings.gradle.kts' -g 'gradlew' -g 'mvnw' . "$PROJECT_DIR" 2>/dev/null && found=0
+           -g '*.java' -g '*.kt' -g '*.kts' -g '*.swift' -g 'pom.xml' -g 'build.gradle' -g 'build.gradle.kts' -g 'settings.gradle' -g 'settings.gradle.kts' -g 'gradlew' -g 'mvnw' . "$PROJECT_DIR" 2>/dev/null && found=0
       else
         find "$PROJECT_DIR" \( -name target -o -name build -o -name out -o -name dist -o -name .git \) -prune -o \
-          -type f \( -name '*.java' -o -name '*.kt' -o -name 'pom.xml' -o -name 'build.gradle' -o -name 'build.gradle.kts' -o -name 'settings.gradle' -o -name 'settings.gradle.kts' -o -name 'gradlew' -o -name 'mvnw' \) -print -quit 2>/dev/null | grep -q . && found=0
+          -type f \( -name '*.java' -o -name '*.kt' -o -name '*.kts' -o -name '*.swift' -o -name 'pom.xml' -o -name 'build.gradle' -o -name 'build.gradle.kts' -o -name 'settings.gradle' -o -name 'settings.gradle.kts' -o -name 'gradlew' -o -name 'mvnw' \) -print -quit 2>/dev/null | grep -q . && found=0
       fi
       ;;
     ruby)
