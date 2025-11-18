@@ -1378,7 +1378,7 @@
         "require_substrings": [
           "ExecutorService created without shutdown",
           "ResultSet not closed after use",
-          "Statement/PreparedStatement not closed after use"
+          "Statement/Prepared/CallableStatement not closed after use"
         ]
       }
     },

@@ -428,7 +428,7 @@ ubs .
 ### **Resource Lifecycle AST Coverage**
 
 - **Python** – `modules/helpers/resource_lifecycle_py.py` now reasons over the AST, tracking `with`/`async with`, alias imports, and `.open()`/`.connect()` calls so `ubs-python` warns only when a handle is truly leaking. Pathlib `Path.open()` and similar patterns are handled without brittle regexes.
-- **Java** – New ast-grep rules (`java.resource.executor-no-shutdown`, `java.resource.thread-no-join`, `java.resource.jdbc-no-close`, `java.resource.resultset-no-close`, `java.resource.statement-no-close`) ensure ExecutorServices, raw `Thread`s, `java.sql.Connection`s, `Statement`/`PreparedStatement`, and `ResultSet` handles all get proper shutdown/close semantics before the regex fallback ever runs.
+- **Java** – New ast-grep rules (`java.resource.executor-no-shutdown`, `java.resource.thread-no-join`, `java.resource.jdbc-no-close`, `java.resource.resultset-no-close`, `java.resource.statement-no-close`) ensure ExecutorServices, raw `Thread`s, `java.sql.Connection`s, `Statement`/`PreparedStatement`/`CallableStatement`, and `ResultSet` handles all get proper shutdown/close semantics before the regex fallback ever runs.
 - **C++ / Rust / Ruby** – These modules already relied on ast-grep rule packs; the “Universal AST Adoption” epic is now complete with every language module (JS, Python, Go, C++, Rust, Java, Ruby, Swift, Kotlin) running semantic detectors instead of fragile grep-only heuristics.
 
 #### Python – AST helper in action
