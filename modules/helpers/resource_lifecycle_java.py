@@ -20,41 +20,61 @@ def strip_comments(text: str) -> str:
     in_line = False
     in_block = False
     in_string = False
+    in_text_block = False
     string_quote = ""
     escaped = False
+
+    def mask(ch: str) -> None:
+        result.append("\n" if ch == "\n" else " ")
 
     while i < n:
         ch = text[i]
         nxt = text[i + 1] if i + 1 < n else ""
+        nxt2 = text[i + 2] if i + 2 < n else ""
 
         if in_line:
+            mask(ch)
             if ch == "\n":
                 in_line = False
-                result.append("\n")
-            else:
-                result.append(" ")
             i += 1
             continue
 
         if in_block:
+            mask(ch)
             if ch == "*" and nxt == "/":
-                result.extend("  ")
+                result.append(" ")
                 in_block = False
                 i += 2
             else:
-                result.append("\n" if ch == "\n" else " ")
+                i += 1
+            continue
+
+        if in_text_block:
+            mask(ch)
+            if ch == '"' and nxt == '"' and nxt2 == '"':
+                result.extend('"""')
+                in_text_block = False
+                i += 3
+            else:
                 i += 1
             continue
 
         if in_string:
-            result.append(ch)
+            mask(ch)
             if escaped:
                 escaped = False
             elif ch == "\\":
                 escaped = True
             elif ch == string_quote:
                 in_string = False
+                result.append(ch)
             i += 1
+            continue
+
+        if ch == '"' and nxt == '"' and nxt2 == '"':
+            in_text_block = True
+            result.extend('"""')
+            i += 3
             continue
 
         if ch in ('"', "'"):
