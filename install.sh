@@ -50,7 +50,6 @@ SKIP_RIPGREP=0
 SKIP_JQ=0
 SKIP_TYPOS=0
 SKIP_TYPE_NARROWING=0
-SKIP_TYPE_NARROWING=0
 TYPE_NARROWING_READY=0
 SKIP_HOOKS=0
 INSTALL_DIR=""
@@ -59,11 +58,31 @@ SKIP_VERSION_CHECK=0
 RUN_VERIFICATION=1
 DRY_RUN=0
 RUN_SELF_TEST=0
+RUN_DOCTOR=1
+SESSION_AGENT_SUMMARY=""
 
 # Temporary files tracking for cleanup
 TEMP_FILES=()
 # Temporary working directory for this run (isolates artifacts; pruned on EXIT)
-WORKDIR="$(mktemp -d 2>/dev/null || mktemp -d -t ubs-install)"
+WORKDIR_CAN_DELETE=1
+if [ -n "${UBS_INSTALLER_WORKDIR:-}" ]; then
+  if [[ "${UBS_INSTALLER_WORKDIR}" = /* ]]; then
+    WORKDIR="${UBS_INSTALLER_WORKDIR}"
+  else
+    WORKDIR="$PWD/${UBS_INSTALLER_WORKDIR}"
+  fi
+  if [ -e "$WORKDIR" ]; then
+    error "UBS_INSTALLER_WORKDIR path already exists: $WORKDIR"
+    error "Provide a non-existent directory so the installer can manage its lifecycle safely."
+    exit 1
+  fi
+  if ! mkdir -p "$WORKDIR" 2>/dev/null; then
+    error "Unable to create installer work directory: $WORKDIR"
+    exit 1
+  fi
+else
+  WORKDIR="$(mktemp -d 2>/dev/null || mktemp -d -t ubs-install)"
+fi
 TEMP_FILES+=("$WORKDIR")
 # Lock file for concurrent execution prevention (MUST be fixed name, not $$)
 LOCK_FILE="/tmp/ubs-install.lock"
@@ -82,9 +101,9 @@ log_dry_run() {
 log_section() {
   local title="$1"
   echo ""
-  echo -e "${BOLD}${BLUE}═══════════════════════════════════════════════════${RESET}"
-  echo -e "${BOLD}${BLUE}   ${title}${RESET}"
-  echo ""
+  echo -e "${BOLD}${BLUE}╔═══════════════════════════════════════════════════${RESET}"
+  printf "${BOLD}${BLUE}║ %-51s ║${RESET}\n" "$title"
+  echo -e "${BOLD}${BLUE}╚═══════════════════════════════════════════════════${RESET}"
 }
 
 print_help_option() {
@@ -120,6 +139,7 @@ HELP
   print_help_option "--skip-jq" "Skip jq installation"
   print_help_option "--skip-typos" "Skip typos installation"
   print_help_option "--skip-type-narrowing" "Skip Node/TypeScript readiness probe"
+  print_help_option "--skip-doctor" "Skip running 'ubs doctor' after install"
   echo ""
   echo "Integrations:"
   print_help_option "--skip-hooks" "Skip hook/setup prompts"
@@ -170,14 +190,31 @@ mktemp_in_workdir() {
   echo "$path"
 }
 
+safe_remove_temp() {
+  local target="$1"
+  [[ -z "$target" ]] && return 0
+  case "$target" in
+    "/") warn "Refusing to remove /"; return 0 ;;
+    ".") warn "Refusing to remove current directory"; return 0 ;;
+    *)
+      # Only allow removal of files we created under WORKDIR.
+      if [[ "$target" != "$WORKDIR" && "$target" != "$WORKDIR"/* ]]; then
+        return 0
+      fi
+      ;;
+  esac
+  rm -rf "$target" 2>/dev/null || true
+}
+
 cleanup_on_exit() {
   # Clean up temporary files
   if [ ${#TEMP_FILES[@]} -gt 0 ]; then
     for temp_file in "${TEMP_FILES[@]}"; do
-      rm -rf "$temp_file" 2>/dev/null || true
+      safe_remove_temp "$temp_file"
     done
   fi
-  if [ -n "${WORKDIR:-}" ]; then
+  if [ -n "${WORKDIR:-}" ] && [ "$WORKDIR_CAN_DELETE" -eq 1 ]; then
+    # Allow cleanup for installer-managed workdir
     rm -rf "$WORKDIR" 2>/dev/null || true
   fi
   release_lock

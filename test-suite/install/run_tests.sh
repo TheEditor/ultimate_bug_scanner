@@ -22,10 +22,13 @@ run_installer() {
 
   local bin_dir="$home_dir/.local/bin"
   mkdir -p "$bin_dir"
+  local workdir_base="$home_dir/.ubs-workdir"
+  mkdir -p "$workdir_base"
+  local workdir="$workdir_base/$(basename "$(mktemp -u)")"
 
   rm -rf /tmp/ubs-install.lock 2>/dev/null || true
 
-  if ! HOME="$home_dir" PATH="$bin_dir:$PATH" SHELL=/bin/bash \
+  if ! UBS_INSTALLER_WORKDIR="$workdir" HOME="$home_dir" PATH="$bin_dir:$PATH" SHELL=/bin/bash \
       "$INSTALLER" \
         --non-interactive \
         --skip-ast-grep \
@@ -58,6 +61,13 @@ run_installer() {
   if [ -d /tmp/ubs-install.lock ]; then
     echo "[FAIL] lock directory /tmp/ubs-install.lock left behind (log: $log_file)"
     rm -rf /tmp/ubs-install.lock 2>/dev/null || true
+    tests_failed=1
+    return 1
+  fi
+
+  if [ -d "$workdir" ]; then
+    echo "[FAIL] installer workdir $workdir was not cleaned up"
+    rm -rf "$workdir" 2>/dev/null || true
     tests_failed=1
     return 1
   fi
