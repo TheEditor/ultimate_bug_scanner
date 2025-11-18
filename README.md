@@ -1108,6 +1108,16 @@ curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scan
 
 ### Installer Safety Nets
 
+#### Uninstall from any shell
+
+Run the installer in `--uninstall` mode via curl if you want to remove UBS and all of its integrations:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh | bash -s -- --uninstall
+```
+
+This command deletes the UBS binary, shell RC snippets/aliases, config under `~/.config/ubs`, and the optional Claude/Git hooks that the installer set up.
+
 | Flag | What it does | Why it matters |
 |------|--------------|----------------|
 | `--dry-run` | Prints every install action (downloads, PATH edits, hook writes, cleanup) without touching disk. Dry runs still resolve config, detect agents, and show you exactly what *would* change. | Audit the installer, demo it to teammates, or validate CI steps without modifying a workstation. |
