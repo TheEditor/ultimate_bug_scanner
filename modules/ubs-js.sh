@@ -1554,6 +1554,7 @@ persist_metric_json() {
 
 write_ast_rules() {
   [[ "$HAS_AST_GREP" -eq 1 ]] || return 0
+  trap '[[ -n "${AST_RULE_DIR:-}" ]] && rm -rf "$AST_RULE_DIR" || true' EXIT
   AST_RULE_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t ag_rules.XXXXXX)"
   if [[ -n "$USER_RULE_DIR" && -d "$USER_RULE_DIR" ]]; then
     cp -R "$USER_RULE_DIR"/. "$AST_RULE_DIR"/ 2>/dev/null || true

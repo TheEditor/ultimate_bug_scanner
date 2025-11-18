@@ -476,8 +476,8 @@ show_ast_samples_from_json() {
 
 write_ast_rules() {
   [[ "$HAS_AST_GREP" -eq 1 ]] || return 0
-  AST_RULE_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t swift_ag_rules.XXXXXX)"
   trap '[[ -n "${AST_RULE_DIR:-}" ]] && rm -rf "$AST_RULE_DIR" || true' EXIT
+  AST_RULE_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t swift_ag_rules.XXXXXX)"
 
   # ── Core Swift rules (reliable regexes for portability across tree-sitter builds) ──
   cat >"$AST_RULE_DIR/force-unwrap.yml" <<'YAML'
