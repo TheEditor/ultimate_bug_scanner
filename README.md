@@ -184,8 +184,8 @@ Unlike traditional linters that fight AI-generated code, this scanner **embraces
 ✅ Integrates with git hooks, CI/CD, file watchers
 ✅ Actionable output (tells you WHAT's wrong and HOW to fix it)
 ✅ Fails fast in CI (catch bugs before they merge)
-✅ New: React Hooks dependency analysis that spots missing deps, unstable objects, and stale closures
-✅ New: Lightweight taint analysis that traces req.body/window.location/localStorage → innerHTML/res.send/eval/exec/db.query and flags flows without DOMPurify/escapeHtml/parameterized SQL
+✅ React Hooks dependency analysis that spots missing deps, unstable objects, and stale closures
+✅ Lightweight taint analysis that traces req.body/window.location/localStorage → innerHTML/res.send/eval/exec/db.query and flags flows without DOMPurify/escapeHtml/parameterized SQL
 ```
 
 ### 📊 **4. Real-World Impact**
@@ -386,7 +386,7 @@ ubs .
 
 ### **Type Narrowing Coverage Across Languages**
 
-- **TypeScript** – UBS shells out to `tsserver` (via the bundled helper) whenever Node.js + the `typescript` package are available. The installer now surfaces a “Type narrowing readiness” diagnostic so you immediately know if tsserver-powered guards are running.
+- **TypeScript** – UBS shells out to `tsserver` (via the bundled helper) whenever Node.js + the `typescript` package are available. The installer surfaces a "Type narrowing readiness" diagnostic so you immediately know if tsserver-powered guards are running.
 - **Rust** – A Python helper inspects `if let Some/Ok` guard clauses and flags subsequent `.unwrap()`/`.expect()` calls outside of exiting blocks. Fixtures and manifest cases keep this regression-tested.
 - **Kotlin** – The Java module scans `.kt` sources for `if (value == null)` guards that merely log and keep running before hitting `value!!`, catching the same pitfall on JVM teams that mix Java + Kotlin.
 
