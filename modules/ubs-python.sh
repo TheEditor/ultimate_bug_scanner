@@ -1722,14 +1722,64 @@ elif [ "$count" -gt 0 ]; then
 fi
 
 print_subheader "Mutation during iteration"
-if [[ "$HAS_AST_GREP" -eq 1 ]]; then
-  count=$("${AST_GREP_CMD[@]}" --lang python --pattern $'for $I in $C:\n  $B' "$PROJECT_DIR" --json=stream 2>/dev/null | grep -c . || true)
-else
-  count=$("${GREP_RN[@]}" -e "for[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]+in[[:space:]]+[A-Za-z_][A-Za-z0-9_]*" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
-fi
-count=$(printf '%s\n' "$count" | awk 'END{print $0+0}')
-if [ "$count" -gt 5 ]; then
-  print_finding "warning" "$count" "Possible mutation during iteration" "Copy or iterate over snapshot"
+mapfile -t MUTATION_REPORT < <(python3 - "$PROJECT_DIR" <<'PY' 2>/dev/null || true
+import ast, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+skip = {'.git', '.hg', '.svn', '.venv', '.tox', '__pycache__'}
+mutating_attrs = {"append","extend","insert","pop","remove","clear","update","discard","add"}
+
+def should_skip(path: pathlib.Path) -> bool:
+    return any(part in skip for part in path.parts)
+
+def body_mutates(body, name):
+    module = ast.Module(body=body, type_ignores=[])
+    for node in ast.walk(module):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                if func.value.id == name and func.attr in mutating_attrs:
+                    return True
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == name:
+                    return True
+        elif isinstance(node, ast.AugAssign):
+            target = node.target
+            if isinstance(target, ast.Name) and target.id == name:
+                return True
+    return False
+
+count = 0
+examples = []
+for path in root.rglob("*.py"):
+    if should_skip(path.relative_to(root)):
+        continue
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except Exception:
+        continue
+    for node in ast.walk(tree):
+        if isinstance(node, ast.For) and isinstance(node.iter, ast.Name):
+            col = node.iter.id
+            if body_mutates(node.body, col):
+                count += 1
+                if len(examples) < 3:
+                    examples.append(f"{path.relative_to(root)}:{node.lineno}")
+
+print(count)
+for ex in examples:
+    print(ex)
+PY
+)
+mutation_count="${MUTATION_REPORT[0]:-0}"
+mutation_count=$(printf '%s\n' "$mutation_count" | awk 'END{print $0+0}')
+if [ "$mutation_count" -gt 0 ]; then
+  local_desc="Copy or iterate over snapshot"
+  if [ "${#MUTATION_REPORT[@]}" -gt 1 ]; then
+    IFS=', ' read -r -a _samples <<<"${MUTATION_REPORT[*]:1}"
+    local_desc="Examples: ${MUTATION_REPORT[*]:1}"
+  fi
+  print_finding "warning" "$mutation_count" "Possible mutation during iteration" "$local_desc"
 fi
 
 print_subheader "len(x) comparisons"
@@ -1955,12 +2005,61 @@ print_category "Detects: json.loads without try, str+num concat, int() edge case
   "Parsing bugs cause runtime exceptions and data corruption."
 
 print_subheader "json.loads without try/catch"
-count=$("${GREP_RN[@]}" -e "json\.loads\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
-trycatch_count=$("${GREP_RNW[@]}" -B2 "try" "$PROJECT_DIR" 2>/dev/null || true | (grep -c "json\.loads" || true))
-trycatch_count=$(printf '%s\n' "$trycatch_count" | awk 'END{print $0+0}')
-if [ "$count" -gt "$trycatch_count" ]; then
-  ratio=$((count - trycatch_count))
-  print_finding "warning" "$ratio" "json.loads without error handling" "Wrap in try/except ValueError"
+mapfile -t JSON_LOADS_REPORT < <(python3 - "$PROJECT_DIR" <<'PY' 2>/dev/null || true
+import ast, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+skip = {'.git', '.hg', '.svn', '.venv', '.tox', '__pycache__'}
+
+def should_skip(path: pathlib.Path) -> bool:
+    return any(part in skip for part in path.parts)
+
+def annotate(node, parent=None):
+    for child in ast.iter_child_nodes(node):
+        child.parent = node
+        annotate(child, node)
+
+def in_try(node):
+    current = getattr(node, 'parent', None)
+    while current is not None:
+        if isinstance(current, ast.Try):
+            return True
+        current = getattr(current, 'parent', None)
+    return False
+
+count = 0
+examples = []
+for path in root.rglob("*.py"):
+    if should_skip(path.relative_to(root)):
+        continue
+    try:
+        text = path.read_text(encoding="utf-8")
+        tree = ast.parse(text)
+    except Exception:
+        continue
+    annotate(tree)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Attribute) and func.attr == "loads":
+                if isinstance(func.value, ast.Name) and func.value.id == "json":
+                    if not in_try(node):
+                        count += 1
+                        if len(examples) < 3:
+                            rel = path.relative_to(root)
+                            examples.append(f"{rel}:{node.lineno}")
+print(count)
+for ex in examples:
+    print(ex)
+PY
+)
+json_bad="${JSON_LOADS_REPORT[0]:-0}"
+json_bad=$(printf '%s\n' "$json_bad" | awk 'END{print $0+0}')
+if [ "$json_bad" -gt 0 ]; then
+  desc="Wrap in try/except ValueError"
+  if [ "${#JSON_LOADS_REPORT[@]}" -gt 1 ]; then
+    desc="Examples: ${JSON_LOADS_REPORT[*]:1}"
+  fi
+  print_finding "warning" "$json_bad" "json.loads without error handling" "$desc"
 fi
 
 print_subheader "String concatenation with + adjacent to digits (possible type mix)"
