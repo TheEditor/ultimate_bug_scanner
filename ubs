@@ -16,6 +16,17 @@ UBS_VERSION="1.0"
 REPO_RAW="https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/main"
 MODULE_PATH_TEMPLATE="$REPO_RAW/modules/ubs-%s.sh"
 
+# Known-good module digests (sha256) for supply-chain verification.
+declare -A MODULE_CHECKSUMS=(
+  [js]='467a5829ef55f3dc27a76335072ccbbf2066e324b2a236ce229e5d70e533fb22'
+  [python]='a6175a56206c61d05e6f73569b02430d07eb797b6d6d63bf7fe7b1ae8d4ece96'
+  [cpp]='4b5c9963fb0dddab504255f59a6b24ee872d90bc3ff1adeb141193f79337c671'
+  [rust]='ab444145b78dea05dba41111fd63ecaa0d560b496aad4997c3f614cbb38a8049'
+  [golang]='1ffde3581adc85ea70d4287ae6b9c3e2edd8256aa9af8ada36e303ef7e00cf8f'
+  [java]='af71e11a018dcffce9a260d94f04fa17d94ba008e5deac5d12ac29aef55002b4'
+  [ruby]='b147852bf853d28442cdefd9f638830e5e6a676f473b7bb9d85b44869d31dfea'
+)
+
 # Colors (respect NO_COLOR or non-tty)
 if [[ -n "${NO_COLOR:-}" || ! -t 1 ]]; then
   RED= GREEN= YELLOW= BLUE= MAGENTA= CYAN= WHITE= GRAY= BOLD= DIM= RESET=
@@ -48,10 +59,19 @@ MODULE_DIR="$MODULE_DIR_DEFAULT"
 UPDATE_MODULES=0
 JOBS="${JOBS:-0}"
 SKIP_TYPE_NARROWING=0
+MODE="scan"
+VERIFY_MODULE_ERR=""
+ALL_LANGS=(js python cpp rust golang java ruby)
+
+if [[ "${1:-}" == "doctor" ]]; then
+  MODE="doctor"
+  shift
+fi
 
 usage() {
   cat <<USAGE >&2
 Usage: ubs [options] [PROJECT_DIR]
+       ubs doctor [options]
 
 Options:
   --format=FMT            text|json|sarif (default: text)
@@ -71,45 +91,78 @@ Examples:
   ubs .                       # auto-detect languages and scan
   ubs --format=json --ci .    # machine-readable combined JSON
   ubs --only=js,python .      # restrict language set
+  ubs doctor --fix            # validate cached modules & redownload corrupted copies
 USAGE
 }
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --format=*) FORMAT="${1#*=}"; shift;;
-    --ci) CI_MODE=1; shift;;
-    --fail-on-warning) FAIL_ON_WARNING=1; shift;;
-    -v|--verbose) VERBOSE=1; shift;;
-    --only=*) ONLY_LANGS="${1#*=}"; shift;;
-    --exclude=*) EXCLUDE_LANGS="${1#*=}"; shift;;
-    --ignore-file=*) IGNORE_FILE="${1#*=}"; shift;;
-    --module-dir=*) MODULE_DIR="${1#*=}"; shift;;
-    --update-modules) UPDATE_MODULES=1; shift;;
-    --jobs=*) JOBS="${1#*=}"; shift;;
-    --skip-type-narrowing) SKIP_TYPE_NARROWING=1; shift;;
-    -h|--help) usage; exit 0;;
-    *)
-      if [[ "$PROJECT_DIR" == "." ]]; then PROJECT_DIR="$1"; else usage; exit 2; fi
-      shift;;
-  esac
-done
+doctor_usage(){
+  cat <<DOC >&2
+Usage: ubs doctor [options]
 
-if [[ -d "$PROJECT_DIR" ]]; then
-  if ! PROJECT_DIR="$(cd "$PROJECT_DIR" 2>/dev/null && pwd -P)"; then
-    say "${RED}$X cannot access project directory${RESET}: $PROJECT_DIR"
-    exit 2
-  fi
-elif [[ -f "$PROJECT_DIR" ]]; then
-  proj_dir="$(dirname "$PROJECT_DIR")"
-  proj_base="$(basename "$PROJECT_DIR")"
-  if ! proj_dir="$(cd "$proj_dir" 2>/dev/null && pwd -P)"; then
-    say "${RED}$X cannot access project path${RESET}: $PROJECT_DIR"
-    exit 2
-  fi
-  PROJECT_DIR="$proj_dir/$proj_base"
+Options:
+  --module-dir=DIR   Override the module cache directory (default: $MODULE_DIR_DEFAULT)
+  --fix              Automatically download or refresh cached modules
+  -h, --help         Show this help message
+DOC
+}
+
+DOCTOR_FIX=0
+if [[ "$MODE" == "doctor" ]]; then
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --module-dir=*) MODULE_DIR="${1#*=}"; shift;;
+      --module-dir)
+        if [[ $# -lt 2 ]]; then doctor_usage; exit 2; fi
+        shift; MODULE_DIR="$1"; shift;;
+      --fix) DOCTOR_FIX=1; shift;;
+      -h|--help) doctor_usage; exit 0;;
+      *)
+        say "${RED}$X unknown doctor option${RESET}: $1"
+        doctor_usage
+        exit 2
+        ;;
+    esac
+  done
 else
-  say "${RED}$X path not found${RESET}: $PROJECT_DIR"
-  exit 2
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --format=*) FORMAT="${1#*=}"; shift;;
+      --ci) CI_MODE=1; shift;;
+      --fail-on-warning) FAIL_ON_WARNING=1; shift;;
+      -v|--verbose) VERBOSE=1; shift;;
+      --only=*) ONLY_LANGS="${1#*=}"; shift;;
+      --exclude=*) EXCLUDE_LANGS="${1#*=}"; shift;;
+      --ignore-file=*) IGNORE_FILE="${1#*=}"; shift;;
+      --module-dir=*) MODULE_DIR="${1#*=}"; shift;;
+      --module-dir)
+        if [[ $# -lt 2 ]]; then usage; exit 2; fi
+        shift; MODULE_DIR="$1"; shift;;
+      --update-modules) UPDATE_MODULES=1; shift;;
+      --jobs=*) JOBS="${1#*=}"; shift;;
+      --skip-type-narrowing) SKIP_TYPE_NARROWING=1; shift;;
+      -h|--help) usage; exit 0;;
+      *)
+        if [[ "$PROJECT_DIR" == "." ]]; then PROJECT_DIR="$1"; else usage; exit 2; fi
+        shift;;
+    esac
+  done
+  if [[ -d "$PROJECT_DIR" ]]; then
+    if ! PROJECT_DIR="$(cd "$PROJECT_DIR" 2>/dev/null && pwd -P)"; then
+      say "${RED}$X cannot access project directory${RESET}: $PROJECT_DIR"
+      exit 2
+    fi
+  elif [[ -f "$PROJECT_DIR" ]]; then
+    proj_dir="$(dirname "$PROJECT_DIR")"
+    proj_base="$(basename "$PROJECT_DIR")"
+    if ! proj_dir="$(cd "$proj_dir" 2>/dev/null && pwd -P)"; then
+      say "${RED}$X cannot access project path${RESET}: $PROJECT_DIR"
+      exit 2
+    fi
+    PROJECT_DIR="$proj_dir/$proj_base"
+  else
+    say "${RED}$X path not found${RESET}: $PROJECT_DIR"
+    exit 2
+  fi
 fi
 SOURCE_PROJECT_DIR="$PROJECT_DIR"
 
@@ -127,6 +180,24 @@ prepare_metrics_dir(){
   local dir="$1"
   rm -rf "$dir" 2>/dev/null || true
   mkdir -p "$dir" 2>/dev/null || true
+}
+
+finalize_module_dir(){
+  local configured="${MODULE_DIR:-}"
+  if [[ -z "$configured" ]]; then
+    MODULE_DIR="$MODULE_DIR_DEFAULT"
+  else
+    MODULE_DIR="$configured"
+    while [[ "$MODULE_DIR" == */ && "$MODULE_DIR" != "/" ]]; do
+      MODULE_DIR="${MODULE_DIR%/}"
+    done
+    [[ -z "$MODULE_DIR" ]] && MODULE_DIR="$MODULE_DIR_DEFAULT"
+  fi
+  ensure_dir "$MODULE_DIR"
+  local resolved
+  if resolved=$(cd "$MODULE_DIR" 2>/dev/null && pwd -P); then
+    MODULE_DIR="$resolved"
+  fi
 }
 
 load_ignore_patterns(){
@@ -165,6 +236,163 @@ PY
     local human="${csv//,/ }"
     say "${DIM}${INFO}${RESET} Ignoring paths from ${file} → ${human}"
   fi
+}
+
+checksum_tool_name(){
+  if need_cmd sha256sum; then echo "sha256sum"; return 0; fi
+  if need_cmd shasum; then echo "shasum -a 256"; return 0; fi
+  if need_cmd openssl; then echo "openssl dgst -sha256"; return 0; fi
+  return 1
+}
+
+compute_sha256(){
+  local path="$1"
+  if need_cmd sha256sum; then sha256sum "$path" | awk '{print $1}'; return 0; fi
+  if need_cmd shasum; then shasum -a 256 "$path" | awk '{print $1}'; return 0; fi
+  if need_cmd openssl; then openssl dgst -sha256 "$path" | awk '{print $NF}'; return 0; fi
+  return 1
+}
+
+should_verify_module_path(){
+  local path="$1"
+  [[ -n "$path" && -n "$MODULE_DIR" ]] || return 1
+  if [[ "$MODULE_DIR" == "/" ]]; then
+    [[ "$path" == /* ]]
+  else
+    case "$path" in
+      "$MODULE_DIR"/*) return 0;;
+      *) return 1;;
+    esac
+  fi
+}
+
+verify_module_checksum(){
+  local lang="$1" path="$2"
+  local expected="${MODULE_CHECKSUMS[$lang]:-}"
+  VERIFY_MODULE_ERR=""
+  should_verify_module_path "$path" || return 0
+  [[ -n "$expected" ]] || return 0
+  if [[ ! -f "$path" ]]; then
+    VERIFY_MODULE_ERR="module file not found at $path"
+    return 1
+  fi
+  local actual
+  if ! actual="$(compute_sha256 "$path")"; then
+    VERIFY_MODULE_ERR="unable to compute checksum (install sha256sum, shasum, or openssl)"
+    return 2
+  fi
+  if [[ "$actual" != "$expected" ]]; then
+    VERIFY_MODULE_ERR="checksum mismatch for $lang (expected $expected, got $actual)"
+    return 1
+  fi
+  return 0
+}
+
+DOCTOR_FAILS=0
+DOCTOR_WARNINGS=0
+doctor_report(){
+  local level="$1" message="$2"
+  case "$level" in
+    ok)
+      say "  ${GREEN}${CHECK}${RESET} $message"
+      ;;
+    warn)
+      DOCTOR_WARNINGS=$((DOCTOR_WARNINGS+1))
+      say "  ${YELLOW}${WARN}${RESET} $message"
+      ;;
+    info)
+      say "  ${CYAN}${INFO}${RESET} $message"
+      ;;
+    err)
+      DOCTOR_FAILS=$((DOCTOR_FAILS+1))
+      say "  ${RED}${X}${RESET} $message"
+      ;;
+  esac
+}
+
+run_doctor(){
+  local fix="$1"
+  DOCTOR_FAILS=0
+  DOCTOR_WARNINGS=0
+  say "${BOLD}UBS Doctor${RESET}"
+  doctor_report info "Module cache: ${DIM}$MODULE_DIR${RESET}"
+
+  local checksum_tool
+  if checksum_tool=$(checksum_tool_name); then
+    doctor_report ok "Checksum tool available: $checksum_tool"
+  else
+    doctor_report err "No checksum tool found (install sha256sum, shasum, or openssl)"
+  fi
+
+  if need_cmd curl; then
+    doctor_report ok "curl available for module downloads"
+  elif need_cmd wget; then
+    doctor_report ok "wget available for module downloads"
+  else
+    doctor_report warn "Neither curl nor wget present; network module updates will fail"
+  fi
+
+  if [[ -w "$MODULE_DIR" ]]; then
+    doctor_report ok "Module cache is writable"
+  else
+    doctor_report err "Module cache is not writable: $MODULE_DIR"
+  fi
+
+  local lang module_path verify_status
+  for lang in "${ALL_LANGS[@]}"; do
+    module_path="$(resolve_module_path "$lang")"
+    if should_verify_module_path "$module_path"; then
+      if [[ -f "$module_path" ]]; then
+        if verify_module_checksum "$lang" "$module_path"; then
+          doctor_report ok "$lang module checksum verified ($module_path)"
+        else
+          verify_status=$?
+          if [[ $verify_status -eq 2 ]]; then
+            doctor_report err "$lang module: $VERIFY_MODULE_ERR"
+          else
+            if [[ "$fix" -eq 1 ]]; then
+              say "    ${DIM}Refreshing $lang module...${RESET}"
+              if download_module "$lang" "$module_path"; then
+                doctor_report ok "$lang module refreshed and verified"
+              else
+                doctor_report err "Failed to refresh $lang module: ${VERIFY_MODULE_ERR:-see logs}"
+              fi
+            else
+              doctor_report err "$lang module: $VERIFY_MODULE_ERR (re-run with --fix)"
+            fi
+          fi
+        fi
+      else
+        if [[ "$fix" -eq 1 ]]; then
+          say "    ${DIM}Caching $lang module...${RESET}"
+          if download_module "$lang" "$module_path"; then
+            doctor_report ok "$lang module downloaded and verified"
+          else
+            doctor_report err "Failed to download $lang module: ${VERIFY_MODULE_ERR:-see logs}"
+          fi
+        else
+          doctor_report warn "$lang module not cached yet (use --fix to pre-download)"
+        fi
+      fi
+    else
+      if [[ -x "$module_path" ]]; then
+        doctor_report info "$lang module supplied by $(dirname "$module_path") (custom/bundled, checksum skipped)"
+      else
+        doctor_report warn "$lang module expected at $module_path but is not executable"
+      fi
+    fi
+  done
+
+  if [[ $DOCTOR_FAILS -gt 0 ]]; then
+    say "${RED}${X}${RESET} Doctor detected $DOCTOR_FAILS blocking issue(s)."
+    return 1
+  fi
+  if [[ $DOCTOR_WARNINGS -gt 0 ]]; then
+    say "${YELLOW}${WARN}${RESET} Doctor completed with $DOCTOR_WARNINGS warning(s)."
+  else
+    say "${GREEN}${CHECK}${RESET} Environment looks good."
+  fi
+  return 0
 }
 
 apply_ignore_filters(){
@@ -211,17 +439,14 @@ path.write_text(data.replace(src, dst))
 PY
 }
 
-if [[ -z "$IGNORE_FILE" && -f "$SOURCE_PROJECT_DIR/.ubsignore" ]]; then
-  IGNORE_FILE="$SOURCE_PROJECT_DIR/.ubsignore"
+if [[ "$MODE" != "doctor" ]]; then
+  if [[ -z "$IGNORE_FILE" && -f "$SOURCE_PROJECT_DIR/.ubsignore" ]]; then
+    IGNORE_FILE="$SOURCE_PROJECT_DIR/.ubsignore"
+  fi
+  if [[ -n "$IGNORE_FILE" ]]; then
+    load_ignore_patterns "$IGNORE_FILE"
+  fi
 fi
-if [[ -n "$IGNORE_FILE" ]]; then
-  load_ignore_patterns "$IGNORE_FILE"
-fi
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Language catalog
-# ─────────────────────────────────────────────────────────────────────────────
-ALL_LANGS=(js python cpp rust golang java ruby)
 
 # Detectors (fast ripgrep if available, else find)
 detect_lang(){
@@ -326,6 +551,14 @@ download_module(){
   local head; head="$(head -n 1 "$path" | tr -d '\r')"
   if [[ ! "$head" =~ ^#! ]]; then say "${RED}$X module missing shebang (lang=$lang)${RESET}"; return 1; fi
   chmod +x "$path" || true
+  if should_verify_module_path "$path"; then
+    if ! verify_module_checksum "$lang" "$path"; then
+      local err_msg="${VERIFY_MODULE_ERR:-checksum verification failed for $lang}"
+      say "${RED}$X failed to verify module ${BOLD}$lang${RESET}: $err_msg"
+      rm -f "$path" 2>/dev/null || true
+      return 1
+    fi
+  fi
   return 0
 }
 
@@ -334,8 +567,26 @@ ensure_module(){
   if [ "$UPDATE_MODULES" -eq 1 ] || [ ! -x "$path" ]; then
     download_module "$lang" "$path" || return 1
   fi
+  if should_verify_module_path "$path" && [ -x "$path" ]; then
+    if ! verify_module_checksum "$lang" "$path"; then
+      local verify_code=$?
+      if [[ $verify_code -eq 2 ]]; then
+        say "${RED}$X ${VERIFY_MODULE_ERR}${RESET}"
+        return 1
+      fi
+      say "${YELLOW}${WARN}${RESET} cached $lang module failed verification (${VERIFY_MODULE_ERR:-corrupt}); refreshing..."
+      download_module "$lang" "$path" || return 1
+    fi
+  fi
   return 0
 }
+
+finalize_module_dir
+
+if [[ "$MODE" == "doctor" ]]; then
+  run_doctor "$DOCTOR_FIX"
+  exit $?
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Execution / aggregation
