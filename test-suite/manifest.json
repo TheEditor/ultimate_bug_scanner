@@ -799,7 +799,10 @@
         },
         "require_substrings": [
           "resource_lifecycle.go",
-          "os.Open/OpenFile without defer Close()"
+          "os.Open/OpenFile without defer Close()",
+          "context.With* without deferred cancel",
+          "time.NewTicker not stopped",
+          "time.NewTimer not stopped"
         ]
       }
     },
@@ -1325,7 +1328,9 @@
           }
         },
         "require_substrings": [
-          "ExecutorService created without shutdown"
+          "ExecutorService created without shutdown",
+          "ResultSet not closed after use",
+          "Statement/PreparedStatement not closed after use"
         ]
       }
     },

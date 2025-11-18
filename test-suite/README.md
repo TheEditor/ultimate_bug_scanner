@@ -54,7 +54,7 @@ test-suite/
 │   └── floating-point-bugs.js         # Precision, money, rounding
 │
 ├── js/type_narrowing/          # TS guard fixtures (buggy + clean)
-├── python/                     # Python fixtures + manifest cases
+├── python/                     # Python fixtures + manifest cases (+ helper unit tests)
 ├── golang/                     # Go fixtures + manifest cases
 ├── cpp/                        # C/C++ fixtures + manifest cases
 ├── rust/                       # Rust fixtures + manifest cases (includes type narrowing demo)
@@ -62,6 +62,26 @@ test-suite/
 ├── ruby/                       # Ruby fixtures + manifest cases
 └── README.md                   # This file
 ```
+
+The Python directory also includes `tests/test_resource_helper.py`, a lightweight unittest for the AST-based lifecycle helper so we can iterate without waiting for every module to run. Go fixtures pair with the helper-backed manifest case to prove ticker/timer/context/file findings stay stable.
+
+## Resource Lifecycle Regression Coverage
+
+Run the helper regression directly when touching the Python analyzer:
+
+```
+uv run python test-suite/python/tests/test_resource_helper.py
+```
+
+It should report leaks for file handles, subprocesses, sockets, and asyncio tasks in the buggy sample while remaining silent on the clean counterpart.
+
+To exercise the Go helper + module integration end-to-end, stick with the manifest harness:
+
+```
+uv run python test-suite/run_manifest.py --case go-resource-lifecycle
+```
+
+`test-suite/manifest.json` now asserts on deterministic substrings for context/ticker/timer/file findings so we immediately notice if the helper output changes.
 
 ## 🧠 Pattern Authoring Philosophy
 
