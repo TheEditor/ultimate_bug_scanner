@@ -31,6 +31,8 @@ shopt -s lastpipe
 shopt -s extglob
 set -o errtrace
 
+SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Ensure predictable IFS for loops (restored on exit)
 ORIG_IFS=${IFS}
 IFS=$' \t\n'
@@ -421,6 +423,45 @@ run_resource_lifecycle_checks() {
       desc+=" (e.g., ${stream_samples%%,*})"
     fi
     print_finding "warning" "$stream_count" "File streams opened without close()" "$desc"
+  fi
+
+  local jdbc_helper="$SCRIPT_DIR/helpers/resource_lifecycle_java.py"
+  if [[ -f "$jdbc_helper" ]] && command -v python3 >/dev/null 2>&1; then
+    local helper_output
+    if helper_output="$(python3 "$jdbc_helper" "$PROJECT_DIR" 2>/dev/null)" && [[ -n "$helper_output" ]]; then
+      local stmt_count=0 rs_count=0
+      local -a stmt_samples=()
+      local -a rs_samples=()
+      while IFS=$'\t' read -r location kind _; do
+        [[ -z "$location" || -z "$kind" ]] && continue
+        case "$kind" in
+          statement_handle)
+            stmt_count=$((stmt_count+1))
+            [[ ${#stmt_samples[@]} -lt 3 ]] && stmt_samples+=("$location")
+            ;;
+          resultset_handle)
+            rs_count=$((rs_count+1))
+            [[ ${#rs_samples[@]} -lt 3 ]] && rs_samples+=("$location")
+            ;;
+        esac
+      done <<<"$helper_output"
+      if [ "$stmt_count" -gt 0 ]; then
+        emitted=1
+        local desc="Use try-with-resources and ensure Statement/PreparedStatement handles call close()"
+        if [ "${#stmt_samples[@]}" -gt 0 ]; then
+          desc+=" (e.g., ${stmt_samples[0]})"
+        fi
+        print_finding "warning" "$stmt_count" "Statement/PreparedStatement not closed after use" "$desc"
+      fi
+      if [ "$rs_count" -gt 0 ]; then
+        emitted=1
+        local desc="Close ResultSet handles or wrap the query in try-with-resources"
+        if [ "${#rs_samples[@]}" -gt 0 ]; then
+          desc+=" (e.g., ${rs_samples[0]})"
+        fi
+        print_finding "warning" "$rs_count" "ResultSet not closed after use" "$desc"
+      fi
+    fi
   fi
 
   if [ "$emitted" -eq 0 ]; then
