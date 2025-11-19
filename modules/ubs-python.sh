@@ -259,41 +259,36 @@ HAS_UV=0
 RG_MAX_SIZE_FLAGS=()
 
 # Resource lifecycle correlation spec (acquire vs release pairs)
-RESOURCE_LIFECYCLE_IDS=(file_handle socket_handle popen_handle asyncio_task context_cancel)
+RESOURCE_LIFECYCLE_IDS=(file_handle socket_handle popen_handle asyncio_task)
 declare -A RESOURCE_LIFECYCLE_SEVERITY=(
   [file_handle]="critical"
   [socket_handle]="warning"
   [popen_handle]="warning"
   [asyncio_task]="warning"
-  [context_cancel]="critical"
 )
 declare -A RESOURCE_LIFECYCLE_ACQUIRE=(
   [file_handle]='open\('
   [socket_handle]='socket\.socket\('
   [popen_handle]='subprocess\.Popen\('
   [asyncio_task]='asyncio\.create_task'
-  [context_cancel]='context\.With(Timeout|Cancel|Deadline)'
 )
 declare -A RESOURCE_LIFECYCLE_RELEASE=(
   [file_handle]='\.close\(|with[[:space:]]+[[:alnum:]_.]*open'
   [socket_handle]='\.close\('
   [popen_handle]='\.wait\(|\.communicate\(|\.terminate\(|\.kill\('
   [asyncio_task]='\.cancel\(|await[[:space:]]+asyncio\.(gather|wait)'
-  [context_cancel]='cancel\('
 )
 declare -A RESOURCE_LIFECYCLE_SUMMARY=(
   [file_handle]='File handles opened without context manager/close'
   [socket_handle]='Sockets opened without matching close()'
   [popen_handle]='Popen handles not waited or terminated'
   [asyncio_task]='asyncio tasks spawned without cancellation/await'
-  [context_cancel]='context.With* without cancel()'
 )
 declare -A RESOURCE_LIFECYCLE_REMEDIATION=(
   [file_handle]='Use "with open(...)" or explicitly call .close()'
   [socket_handle]='Use contextlib closing() or call sock.close() in finally/defer'
   [popen_handle]='Capture the Popen object and call wait/communicate/terminate on it'
   [asyncio_task]='Await the task result or cancel/monitor it before shutdown'
-  [context_cancel]='Store the cancel function and call/defer it immediately after creation'
 )
 
 # ────────────────────────────────────────────────────────────────────────────

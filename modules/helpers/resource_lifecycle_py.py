@@ -5,10 +5,11 @@ from __future__ import annotations
 import ast
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Iterable, Optional
 
-TARGET_SIGS: Dict[Tuple[Optional[str], str], str] = {
+TARGET_SIGS: dict[tuple[Optional[str], str], str] = {
     (None, "open"): "file_handle",
+    ("builtins", "open"): "file_handle",
     ("io", "open"): "file_handle",
     ("pathlib", "open"): "file_handle",
     ("pathlib.Path", "open"): "file_handle",
@@ -20,9 +21,6 @@ TARGET_SIGS: Dict[Tuple[Optional[str], str], str] = {
     ("socket", "socketpair"): "socket_handle",
     ("subprocess", "Popen"): "popen_handle",
     ("asyncio", "create_task"): "asyncio_task",
-    ("context", "WithCancel"): "context_cancel",
-    ("context", "WithTimeout"): "context_cancel",
-    ("context", "WithDeadline"): "context_cancel",
 }
 
 RELEASE_METHODS = {
@@ -43,7 +41,6 @@ MESSAGE_TEMPLATES = {
     "socket_handle": "Socket {name} opened without close()",
     "popen_handle": "subprocess handle {name} never waited/terminated",
     "asyncio_task": "asyncio task {name} neither awaited nor cancelled",
-    "context_cancel": "context cancel function {name} never invoked",
 }
 
 IGNORED_PARTS = {
@@ -77,9 +74,9 @@ class ResourceRecord:
 class Analyzer(ast.NodeVisitor):
     def __init__(self, tree: ast.AST) -> None:
         self.tree = tree
-        self.aliases: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
-        self.records: List[ResourceRecord] = []
-        self.by_name: Dict[str, List[ResourceRecord]] = {}
+        self.aliases: dict[str, tuple[Optional[str], Optional[str]]] = {}
+        self.records: list[ResourceRecord] = []
+        self.by_name: dict[str, list[ResourceRecord]] = {}
         self.safe_calls: set[int] = set()
         self.assigned_calls: set[int] = set()
 
@@ -106,7 +103,7 @@ class Analyzer(ast.NodeVisitor):
         self._mark_context_safe(node.items)
         self.generic_visit(node)
 
-    def _mark_context_safe(self, items: List[ast.withitem]) -> None:
+    def _mark_context_safe(self, items: list[ast.withitem]) -> None:
         for item in items:
             self._mark_safe_calls(item.context_expr)
 
@@ -133,32 +130,26 @@ class Analyzer(ast.NodeVisitor):
             self._handle_assignment([node.target], node.value)
         self.generic_visit(node)
 
-    def _handle_assignment(self, targets: List[ast.expr], value: ast.AST) -> None:
+    def _handle_assignment(self, targets: list[ast.expr], value: ast.AST) -> None:
         sig = self._call_signature_from_expr(value)
+        print(f"Assign val={value}, sig={sig}", file=sys.stderr)
         if not sig:
             return
         kind = TARGET_SIGS.get(sig)
+        print(f"Kind={kind}", file=sys.stderr)
         if not kind:
             return
         self.assigned_calls.add(id(value))
         names = [name for target in targets for name in self._collect_names(target)]
-        if kind == "context_cancel":
-            if len(names) >= 2:
-                self._add_record(names[1], kind, value.lineno)
-            elif names:
-                self._add_record(names[0], kind, value.lineno)
-            else:
-                self._add_record(None, kind, value.lineno)
-            return
         if not names:
             self._add_record(None, kind, value.lineno)
             return
         for name in names:
             self._add_record(name, kind, value.lineno)
 
-    def _collect_names(self, node: ast.expr) -> List[str]:
+    def _collect_names(self, node: ast.expr) -> list[str]:
         if isinstance(node, (ast.Tuple, ast.List)):
-            names: List[str] = []
+            names: list[str] = []
             for elt in node.elts:
                 names.extend(self._collect_names(elt))
             return names
@@ -188,8 +179,6 @@ class Analyzer(ast.NodeVisitor):
                 if method in methods:
                     self._mark_released(name, kind)
                     break
-        elif isinstance(func, ast.Name) and func.id == "cancel":
-            self._mark_released(func.id, "context_cancel")
 
         sig = self._call_signature(node)
         if sig in TASK_RELEASE_SIGS:
@@ -226,12 +215,12 @@ class Analyzer(ast.NodeVisitor):
         if name:
             self.by_name.setdefault(name, []).append(rec)
 
-    def _call_signature_from_expr(self, expr: ast.AST) -> Optional[Tuple[Optional[str], str]]:
+    def _call_signature_from_expr(self, expr: ast.AST) -> Optional[tuple[Optional[str], str]]:
         if isinstance(expr, ast.Call):
             return self._call_signature(expr)
         return None
 
-    def _call_signature(self, call: ast.Call) -> Optional[Tuple[Optional[str], str]]:
+    def _call_signature(self, call: ast.Call) -> Optional[tuple[Optional[str], str]]:
         func = call.func
         if isinstance(func, ast.Name):
             module, obj = self.aliases.get(func.id, (None, None))
@@ -269,8 +258,8 @@ class Analyzer(ast.NodeVisitor):
                 return f"{base}.{expr.attr}"
         return None
 
-    def report(self, path: Path) -> List[str]:
-        issues: List[str] = []
+    def report(self, path: Path) -> list[str]:
+        issues: list[str] = []
         for rec in sorted(self.records, key=lambda r: (r.lineno, r.kind, r.name or "")):
             if rec.released:
                 continue
@@ -281,8 +270,8 @@ class Analyzer(ast.NodeVisitor):
         return issues
 
 
-def collect_files(root: Path) -> List[Path]:
-    files: List[Path] = []
+def collect_files(root: Path) -> list[Path]:
+    files: list[Path] = []
     if root.is_file() and root.suffix == ".py":
         return [root]
     for path in root.rglob("*.py"):
@@ -292,14 +281,16 @@ def collect_files(root: Path) -> List[Path]:
     return files
 
 
-def analyze(path: Path, root: Path) -> List[str]:
+def analyze(path: Path, root: Path) -> list[str]:
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError:
+    except OSError as e:
+        print(f"WARN: Could not read {path}: {e}", file=sys.stderr)
         return []
     try:
         tree = ast.parse(text)
-    except SyntaxError:
+    except SyntaxError as e:
+        print(f"WARN: Syntax error in {path}: {e}", file=sys.stderr)
         return []
     analyzer = Analyzer(tree)
     analyzer.visit(tree)
@@ -312,11 +303,12 @@ def analyze(path: Path, root: Path) -> List[str]:
 
 
 def main() -> None:
+    print("Starting main...", file=sys.stderr)
     if len(sys.argv) != 2:
         print("usage: resource_lifecycle_py.py <project_dir>", file=sys.stderr)
         sys.exit(2)
     root = Path(sys.argv[1])
-    issues: List[str] = []
+    issues: list[str] = []
     for path in sorted(collect_files(root), key=lambda p: str(p)):
         issues.extend(analyze(path, root))
     if issues:
