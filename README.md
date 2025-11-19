@@ -1399,18 +1399,15 @@ Critical issues found? ────┤ YES
     Commit code      Fix issues
 ```
 
-### **Complete UBS Guide for AI Coding Agents (AGENTS.md Blurb)**
+---
 
 > **Copy the content below to your project's `AGENTS.md`, `.claude/claude_docs/`, or `.cursorrules` file for comprehensive UBS integration guidance.**
 
-<details>
-<summary><b>📖 Click to expand UBS quick reference for AI agents</b></summary>
+## UBS Quick Reference for AI Agents
 
-## 🤖 UBS Quick Reference for AI Agents
+UBS stands for "Ultimate Bug Scanner": **The AI Coding Agent's Secret Weapon: Flagging Likely Bugs for Fixing Early On**
 
-> Copy to `AGENTS.md` or `.cursorrules` for integration guidance.
-
-**Install:** `curl -sSL https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh | bash`
+**Install:** `curl -sSL https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/main/install.sh | bash`
 
 **Golden Rule:** `./ubs <changed-files>` before every commit. Exit 0 = safe. Exit >0 = fix & re-run.
 
@@ -1452,8 +1449,6 @@ Parse: `file:line:col` → location | 💡 → how to fix | Exit 0/1 → pass/fa
 - ❌ Ignore findings → ✅ Investigate each
 - ❌ Full scan per edit → ✅ Scope to file
 - ❌ Fix symptom (`if (x) { x.y }`) → ✅ Root cause (`x?.y`)
-
-</details>
 
 ---
 

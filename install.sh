@@ -469,30 +469,33 @@ ask() {
     return 1  # Default to "no" in non-interactive mode
   fi
   local response
+
+  # Method 1: Try /dev/tty if available (best for curl | bash)
   if [ -c /dev/tty ]; then
-    # Explicitly print to /dev/tty to ensure visibility when stdin is piped
-    # We use >/dev/tty for the prompt to guarantee it appears on the terminal
-    # In dry-run or automated test environments where /dev/tty isn't writable,
-    # we gracefully fallback.
+    # Explicitly write to tty. If this fails (e.g. no write perms), we fall through.
     if echo -ne "${YELLOW}?${RESET} ${prompt} (y/N): " > /dev/tty 2>/dev/null; then
-      if ! read -r response < /dev/tty; then
-        # Handle EOF or read error on tty
-        echo "" > /dev/tty 2>/dev/null || true
-        return 1
+      if read -r response < /dev/tty; then
+        [[ "$response" =~ ^[Yy]$ ]]
+        return $?
       fi
-    else
-      # tty exists but not writable (rare, but possible in some containers/CI)
-      if ! read -r -p "$(echo -e "${YELLOW}?${RESET} ${prompt} (y/N): ")" response; then
-        return 1
-      fi
-    fi
-  else
-    # Fallback if no tty available (rare in interactive usage)
-    if ! read -r -p "$(echo -e "${YELLOW}?${RESET} ${prompt} (y/N): ")" response; then
-      return 1
     fi
   fi
-  [[ "$response" =~ ^[Yy]$ ]]
+
+  # Method 2: Try stdin if it's a TTY
+  if [ -t 0 ]; then
+    # Stdin is a terminal, so we can prompt and read normally
+    if read -r -p "$(echo -e "${YELLOW}?${RESET} ${prompt} (y/N): ")" response; then
+      [[ "$response" =~ ^[Yy]$ ]]
+      return $?
+    fi
+  fi
+
+  # Method 3: No interactive channel available
+  # This happens if running non-interactively (e.g. cron, non-tty pipe)
+  # and we failed to access /dev/tty.
+  # We assume 'No' to be safe.
+  # Note: If we are uninstalling via pipe and /dev/tty is missing, this fails safely.
+  return 1
 }
 
 with_backoff() {

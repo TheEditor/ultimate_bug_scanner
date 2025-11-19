@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -56,17 +57,16 @@ def iter_rust_files(root: Path) -> Iterable[Path]:
         if root.suffix == ".rs" and not any(part in SKIP_DIRS for part in root.parts):
             yield root
         return
-    for path in root.rglob("*.rs"):
-        if not path.is_file():
-            continue
-        try:
-            rel = path.relative_to(root)
-        except ValueError:
-            rel = path
-        if any(part in SKIP_DIRS for part in rel.parts):
-            continue
-        if is_safe_path(path):
-            yield path
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Modify dirnames in-place to prune traversal
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        
+        for filename in filenames:
+            if filename.endswith(".rs"):
+                path = Path(dirpath) / filename
+                if is_safe_path(path):
+                    yield path
 
 
 def analyze_guard(text: str, guard: GuardMatch) -> tuple[int, int] | None:
