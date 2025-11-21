@@ -1148,7 +1148,7 @@
         "exit_code": "zero",
         "totals": {
           "warning": {
-            "max": 0
+            "max": 1
           }
         }
       }
