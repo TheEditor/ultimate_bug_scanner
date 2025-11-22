@@ -36,19 +36,25 @@ async function collectFiles(target) {
     return [];
   }
 
-  const batches = await Promise.all(entries.map(async (entry) => {
-    if (entry.isSymbolicLink()) return [];
-    if (SKIP_DIRS.has(entry.name)) return [];
-    const fullPath = path.join(target, entry.name);
-    if (entry.isDirectory()) {
-      if (entry.name.startsWith('.') && entry.name.length > 1) return [];
-      return collectFiles(fullPath);
-    }
-    if (entry.isFile() && EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
-      return [fullPath];
-    }
+  let batches;
+  try {
+    batches = await Promise.all(entries.map(async (entry) => {
+      if (entry.isSymbolicLink()) return [];
+      if (SKIP_DIRS.has(entry.name)) return [];
+      const fullPath = path.join(target, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name.startsWith('.') && entry.name.length > 1) return [];
+        return collectFiles(fullPath);
+      }
+      if (entry.isFile() && EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
+        return [fullPath];
+      }
+      return [];
+    }));
+  } catch (err) {
+    console.warn(`[ubs-type-narrowing] Failed to enumerate ${target}: ${err.message}`);
     return [];
-  })).catch(() => []);
+  }
   return batches.flat();
 }
 

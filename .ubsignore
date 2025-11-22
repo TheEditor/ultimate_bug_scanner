@@ -4,3 +4,4 @@
 
 test-suite/
 modules/helpers/*.go
+modules/helpers/type_narrowing_ts.js

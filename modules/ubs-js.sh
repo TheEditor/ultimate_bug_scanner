@@ -1595,31 +1595,31 @@ message: "Assigning innerHTML; ensure input is sanitized or use textContent"
 YAML
   cat >"$AST_RULE_DIR/then-without-catch.yml" <<'YAML'
 id: js.then-without-catch
-language: typescript
+language: javascript
 rule:
-  pattern: $P.then($$)
+  pattern: $P.then($ARGS)
   not:
     has:
-      pattern: .catch($$)
+      pattern: .catch($CATCH)
 severity: warning
 message: "Promise.then without catch/finally; handle rejections"
 YAML
   # Alias for async group compatibility
   cat >"$AST_RULE_DIR/async-then-no-catch.yml" <<'YAML'
 id: js.async.then-no-catch
-language: typescript
+language: javascript
 rule:
-  pattern: $P.then($$)
+  pattern: $P.then($ARGS)
   not:
     has:
-      pattern: .catch($$)
+      pattern: .catch($CATCH)
 severity: warning
 message: "Promise.then without .catch/.finally; add rejection handling"
 YAML
   cat >"$AST_RULE_DIR/async-promiseall-no-try.yml" <<'YAML'
 id: js.async.promiseall-no-try
-language: typescript
-rule: { pattern: await Promise.all($$), not: { inside: { kind: try_statement } } }
+language: javascript
+rule: { pattern: await Promise.all($ARGS), not: { inside: { kind: try_statement } } }
 severity: warning
 message: "await Promise.all() without try/catch; wrap to handle aggregate failures"
 YAML
@@ -1773,33 +1773,33 @@ YAML
   # New: Dangling promises (heuristic)
   cat >"$AST_RULE_DIR/async-dangling-promise.yml" <<'YAML'
 id: js.async.dangling-promise
-language: typescript
+language: javascript
 rule:
   all:
     - any:
-        - pattern: $CALLEE($$)
-        - pattern: new $CALLEE($$)
+        - pattern: $CALLEE($ARGS)
+        - pattern: new $CALLEE($ARGS)
     - not:
         inside:
           any:
             - pattern: await $EXPR
-            - pattern: $EXPR.then($$)
-            - pattern: Promise.all($$)
-            - pattern: Promise.race($$)
+            - pattern: $EXPR.then($ARGS)
+            - pattern: Promise.all($ARGS)
+            - pattern: Promise.race($ARGS)
 severity: warning
 message: "Possible unhandled/dangling promise; use await/then/catch"
 YAML
   # New: fetch without rejection handling
   cat >"$AST_RULE_DIR/fetch-no-catch.yml" <<'YAML'
 id: js.fetch.no-catch
-language: typescript
+language: javascript
 rule:
-  pattern: fetch($$)
+  pattern: fetch($ARGS)
   not:
     inside:
       any:
-        - pattern: try { $$ } catch ($E) { $$ }
-        - pattern: .catch($$)
+        - pattern: try { $TRY_BODY } catch ($E) { $CATCH_BODY }
+        - pattern: .catch($CATCH)
 severity: warning
 message: "fetch() without catch/try; network failures will be unhandled"
 YAML

@@ -687,12 +687,12 @@ id: java.async.then-no-exceptionally
 language: java
 rule:
   any:
-    - pattern: $CF.thenApply($$)
-    - pattern: $CF.thenCompose($$)
-    - pattern: $CF.thenAccept($$)
+    - pattern: $CF.thenApply($ARG)
+    - pattern: $CF.thenCompose($ARG)
+    - pattern: $CF.thenAccept($ARG)
   not:
     inside:
-      pattern: $CF.exceptionally($$)
+      pattern: $CF.exceptionally($HANDLER)
 YAML
   tmp_json="$(mktemp 2>/dev/null || mktemp -t java_async_matches.XXXXXX)"
   : >"$tmp_json"
