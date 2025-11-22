@@ -715,13 +715,15 @@ YAML
   rm -rf "$rule_dir"
   if ! [[ -s "$tmp_json" ]]; then
     rm -f "$tmp_json"
-    # Fallback heuristic: flag hook calls to avoid silent misses in CI
-    local effect_calls cb_calls total
-    effect_calls=$("${GREP_RN[@]}" -e "useEffect[[:space:]]*\\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
-    cb_calls=$("${GREP_RN[@]}" -e "useCallback[[:space:]]*\\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
-    total=$((effect_calls + cb_calls))
-    if [ "$total" -gt 0 ]; then
-      print_finding "warning" "$total" "React hooks dependency arrays may be incomplete" "ast-grep yielded no signal; double-check dependencies for useEffect/useCallback"
+    # Fallback heuristic: look for empty dependency arrays across lines
+    local empty_hooks
+    if command -v rg >/dev/null 2>&1; then
+      empty_hooks=$(rg -P "use(Effect|Callback)\\s*\\([^)]*\\[\\s*\\]\\)" "$PROJECT_DIR" 2>/dev/null | wc -l | awk '{print $1+0}')
+    else
+      empty_hooks=$("${GREP_RN[@]}" -e "use(Effect|Callback)[[:space:]]*\\([^)]*\\[\\s*\\]\\)" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+    fi
+    if [ "${empty_hooks:-0}" -gt 0 ]; then
+      print_finding "warning" "$empty_hooks" "React hooks dependency array appears empty" "Add required props/state/refs to dependency arrays"
     else
       print_finding "good" "Hooks dependency arrays look accurate"
     fi
