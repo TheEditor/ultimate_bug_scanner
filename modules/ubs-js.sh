@@ -648,7 +648,7 @@ run_async_error_checks() {
 run_hooks_dependency_checks() {
   print_subheader "React hooks dependency analysis"
   if [[ "$HAS_AST_GREP" -ne 1 ]]; then
-    print_finding "warning" 1 "React hook dependencies unchecked" "ast-grep unavailable; review useEffect/useCallback dependencies manually"
+    print_finding "info" 0 "React hook dependencies unchecked" "ast-grep unavailable; review useEffect/useCallback dependencies manually"
     return
   fi
   local rule_dir tmp_json
