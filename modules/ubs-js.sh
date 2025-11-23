@@ -2638,9 +2638,18 @@ if [ "$case_count" -gt "$break_count" ]; then
 fi
 
 print_subheader "Switch without default case"
-default_count=$("${GREP_RN[@]}" -e "default:" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
-if [ "$switch_count" -gt 0 ] && [ "$default_count" -eq 0 ]; then
-  print_finding "warning" "$switch_count" "Switch statements without default case" "Handle unexpected values"
+if [ "$HAS_AST_GREP" -eq 1 ]; then
+  switches_with_default=$(ast_search 'switch ($X) { $CASES* default: $D }' || echo 0)
+  switch_without_default=$(( switch_count - switches_with_default ))
+  if [ "$switch_without_default" -gt 0 ]; then
+    print_finding "warning" "$switch_without_default" "Switch statements without default case" "Handle unexpected values"
+  fi
+else
+  default_count=$("${GREP_RN[@]}" -e "default:" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+  if [ "$switch_count" -gt "$default_count" ]; then
+    diff=$((switch_count - default_count))
+    print_finding "warning" "$diff" "Switch statements without default case" "Handle unexpected values"
+  fi
 fi
 
 print_subheader "Nested ternaries (readability nightmare)"
