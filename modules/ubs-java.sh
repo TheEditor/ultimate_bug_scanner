@@ -803,8 +803,8 @@ check_ast_grep() {
   if command -v sg >/dev/null 2>&1 && sg --version 2>&1 | grep -qi "ast-grep"; then
     AST_GREP_CMD=(sg); HAS_AST_GREP=1; return 0
   fi
-  # Verify npx can actually run ast-grep before trusting it
-  if command -v npx >/dev/null 2>&1 && npx -y @ast-grep/cli --version >/dev/null 2>&1; then
+  # Skip npx in CI environments where download might fail/timeout
+  if [[ -z "${CI:-}" ]] && command -v npx >/dev/null 2>&1 && npx -y @ast-grep/cli --version >/dev/null 2>&1; then
     AST_GREP_CMD=(npx -y @ast-grep/cli); HAS_AST_GREP=1; return 0
   fi
   say "${YELLOW}${WARN} ast-grep not found. Advanced AST checks will be limited.${RESET}"
