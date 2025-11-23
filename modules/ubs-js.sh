@@ -62,18 +62,21 @@ DISABLE_PIPEFAIL_DURING_SCAN=1
 AST_RULE_RESULTS_JSON=""
 
 # Async error coverage spec (rule ids -> metadata)
-ASYNC_ERROR_RULE_IDS=(js.async.then-no-catch js.async.promiseall-no-try)
+ASYNC_ERROR_RULE_IDS=(js.async.then-no-catch js.async.promiseall-no-try js.async.await-no-try)
 declare -A ASYNC_ERROR_SUMMARY=(
   [js.async.then-no-catch]='Promise.then chain missing .catch()'
   [js.async.promiseall-no-try]='Promise.all without try/catch'
+  [js.async.await-no-try]='await outside try/catch'
 )
 declare -A ASYNC_ERROR_REMEDIATION=(
   [js.async.then-no-catch]='Chain .catch() (or .finally()) to surface rejections'
   [js.async.promiseall-no-try]='Wrap Promise.all in try/catch to handle aggregate failures'
+  [js.async.await-no-try]='Wrap awaited calls in try/catch to surface rejections'
 )
 declare -A ASYNC_ERROR_SEVERITY=(
   [js.async.then-no-catch]='warning'
   [js.async.promiseall-no-try]='warning'
+  [js.async.await-no-try]='warning'
 )
 
 # Error handling AST metadata
@@ -1679,6 +1682,17 @@ language: javascript
 rule: { pattern: await Promise.all($ARGS), not: { inside: { kind: try_statement } } }
 severity: warning
 message: "await Promise.all() without try/catch; wrap to handle aggregate failures"
+YAML
+  cat >"$AST_RULE_DIR/async-await-no-try.yml" <<'YAML'
+id: js.async.await-no-try
+language: javascript
+rule:
+  pattern: await $E
+  not:
+    inside:
+      kind: try_statement
+severity: warning
+message: "await without try/catch; wrap to handle rejections"
 YAML
   cat >"$AST_RULE_DIR/eval-call.yml" <<'YAML'
 id: js.eval-call
