@@ -24,7 +24,7 @@ Just want it to do everything without confirmations? Live life on the edge with 
 <div align="center">
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh \
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh?$(date +%s)" \
   | bash -s -- --easy-mode
 ```
 
@@ -167,7 +167,7 @@ ubs . --format=jsonl --beads-jsonl out/findings.jsonl  # Save JSONL for Beads/"s
 ### **Option 1: Automated Install (Recommended)**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh | bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh?$(date +%s)" | bash
 ```
 
 ### **Option 2: Integrity-first install (signed checksums)**
@@ -232,7 +232,7 @@ Need to revisit what the installer discovered later? Run `ubs sessions --entries
 Need the “just make it work” button? Run the installer with `--easy-mode` to auto-install every dependency, accept all prompts, detect local coding agents, and wire their quality guardrails with zero extra questions:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh \
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh?$(date +%s)" \
   | bash -s -- --easy-mode
 ```
 
@@ -275,7 +275,7 @@ curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scan
 Run the installer in `--uninstall` mode via curl if you want to remove UBS and all of its integrations:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh | bash -s -- --uninstall --non-interactive
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh?$(date +%s)" | bash -s -- --uninstall --non-interactive
 ```
 
 This command deletes the UBS binary, shell RC snippets/aliases, config under `~/.config/ubs`, and the optional Claude/Git hooks that the installer set up. Because it passes `--non-interactive`, it auto-confirms all prompts and runs unattended.
@@ -590,7 +590,7 @@ jobs:
 
       - name: Install Bug Scanner
         run: |
-          curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh | bash -s -- --non-interactive
+          curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh?$(date +%s)" | bash -s -- --non-interactive
 
       - name: Scan for Bugs
         run: |
@@ -1943,7 +1943,7 @@ The Ultimate Bug Scanner gives you:
 ### **One Command. Three Seconds. Zero Production Bugs.**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh | bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh?$(date +%s)" | bash
 ```
 
 **Then never waste another evening debugging a null pointer exception.**
