@@ -17,6 +17,8 @@ jobs:
       - name: Run UBS manifest suite
         env:
           NO_COLOR: "1"
+          UBS_NO_AUTO_UPDATE: "1"
+          UBS_LOG_JSON: "1"
         run: |
           cd test-suite
-          ./run_manifest.py --fail-fast
+          uv run python run_manifest.py --fail-fast

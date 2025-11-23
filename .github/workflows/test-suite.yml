@@ -48,4 +48,6 @@ jobs:
       - name: Run full test suite
         env:
           NO_COLOR: "1"
+          UBS_NO_AUTO_UPDATE: "1"
+          UBS_LOG_JSON: "1"
         run: ./test-suite/run_all.sh
