@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Pre-commit hook to ensure module checksums are always up-to-date
+
+set -e
+
+# Check if any module files changed
+MODULES_CHANGED=$(git diff --cached --name-only | grep '^modules/ubs-.*\.sh$' || true)
+
+if [[ -n "$MODULES_CHANGED" ]]; then
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "📦 Module files changed - updating checksums..."
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  
+  # Update checksums
+  ./scripts/update_checksums.sh
+  
+  # Check if ubs file changed
+  if git diff --exit-code ubs >/dev/null 2>&1; then
+    echo "✓ Checksums already up-to-date"
+  else
+    echo ""
+    echo "✓ Checksums updated in 'ubs' file"
+    echo "  Automatically staging updated checksums..."
+    git add ubs
+    echo "  ✓ Staged"
+  fi
+  
+  echo ""
+fi
+
+# Always verify checksums match before allowing commit
+echo "Verifying all checksums match..."
+if ! ./scripts/verify_checksums.sh; then
+  echo ""
+  echo "❌ PRE-COMMIT HOOK FAILED"
+  echo "Module checksums do NOT match!"
+  echo ""
+  echo "This should not happen if auto-update worked."
+  echo "Please run: ./scripts/update_checksums.sh"
+  exit 1
+fi
+
+echo "✓ Pre-commit checks passed"
