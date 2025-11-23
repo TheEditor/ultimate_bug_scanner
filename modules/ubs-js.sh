@@ -619,8 +619,12 @@ run_async_error_checks() {
     then_count=$("${GREP_RN[@]}" -e "\.then\s*\(" "$PROJECT_DIR" 2>/dev/null | \
       (grep -v "\.catch" || true) | (grep -v "\.finally" || true) | count_lines)
     promise_all_count=$("${GREP_RN[@]}" -e "Promise\.all\s*\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
-    try_await_count=$(rg --no-config --no-messages -g '*.js' -g '*.ts' -g '*.tsx' -g '*.mjs' -g '*.cjs' -g '*.jsx' \
-      -e 'try[[:space:]]*\\{[^}]*await' "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+    if command -v rg >/dev/null 2>&1; then
+      try_await_count=$(rg --no-config --no-messages -g '*.js' -g '*.ts' -g '*.tsx' -g '*.mjs' -g '*.cjs' -g '*.jsx' \
+        -e 'try[[:space:]]*\{[^}]*await' "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+    else
+      try_await_count=0
+    fi
 
     if [ "$then_count" -gt 0 ]; then
       print_finding "warning" "$then_count" "Promise.then chain missing .catch()" "Chain .catch() (or .finally()) to surface rejections"
@@ -639,8 +643,12 @@ run_async_error_checks() {
       then_count=$("${GREP_RN[@]}" -e "\.then\s*\(" "$PROJECT_DIR" 2>/dev/null | \
         (grep -v "\.catch" || true) | (grep -v "\.finally" || true) | count_lines)
       promise_all_count=$("${GREP_RN[@]}" -e "Promise\.all\s*\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
-      try_await_count=$(rg --no-config --no-messages -g '*.js' -g '*.ts' -g '*.tsx' -g '*.mjs' -g '*.cjs' -g '*.jsx' \
-        -e 'try[[:space:]]*\\{[^}]*await' "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+      if command -v rg >/dev/null 2>&1; then
+        try_await_count=$(rg --no-config --no-messages -g '*.js' -g '*.ts' -g '*.tsx' -g '*.mjs' -g '*.cjs' -g '*.jsx' \
+          -e 'try[[:space:]]*\{[^}]*await' "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+      else
+        try_await_count=0
+      fi
       if [ "$then_count" -gt 0 ]; then
         print_finding "warning" "$then_count" "Promise.then chain missing .catch()" "Chain .catch() (or .finally()) to surface rejections"
       elif [ "$try_await_count" -gt 0 ]; then
