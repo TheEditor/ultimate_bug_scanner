@@ -76,7 +76,7 @@ declare -A ASYNC_ERROR_REMEDIATION=(
 declare -A ASYNC_ERROR_SEVERITY=(
   [js.async.then-no-catch]='warning'
   [js.async.promiseall-no-try]='warning'
-  [js.async.await-no-try]='warning'
+  [js.async.await-no-try]='info'
 )
 
 # Error handling AST metadata
