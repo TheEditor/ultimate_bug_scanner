@@ -2362,16 +2362,38 @@ install_scanner() {
     fi
   else
     log "Downloading from GitHub..."
-    fetch_checksum_bundle
-    local download_url="${ARTIFACT_BASE}/${SCRIPT_NAME}"
+    # Always download from master branch for latest code
+    local download_url="${REPO_URL}/${SCRIPT_NAME}"
 
     if download_to_file "$download_url" "$temp_path"; then
       log "Downloaded successfully"
-      downloaded_from_release=1
     else
       error "Download failed. Check $download_err"
       rm -f "$temp_path"
       return 1
+    fi
+
+    # Download and verify checksums from master
+    if [ "$RUN_VERIFICATION" -eq 1 ] && [ "$INSECURE" -eq 0 ]; then
+      local sums_url="${REPO_URL}/SHA256SUMS"
+      local sums_file="$WORKDIR/SHA256SUMS"
+
+      log "Verifying checksum..."
+      if download_to_file "$sums_url" "$sums_file"; then
+        # Verify checksum
+        local expected_sum=$(grep "  ${SCRIPT_NAME}$" "$sums_file" | awk '{print $1}')
+        local actual_sum=$(sha256sum "$temp_path" | awk '{print $1}')
+
+        if [[ "$expected_sum" == "$actual_sum" ]]; then
+          success "Checksum verified"
+        else
+          error "Checksum mismatch! Expected: $expected_sum, Got: $actual_sum"
+          rm -f "$temp_path"
+          exit 1
+        fi
+      else
+        warn "Could not download SHA256SUMS - skipping verification"
+      fi
     fi
   fi
 

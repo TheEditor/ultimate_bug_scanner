@@ -28,6 +28,24 @@ if [[ -n "$MODULES_CHANGED" ]]; then
   echo ""
 fi
 
+# Check if ubs script changed and update SHA256SUMS
+UBS_CHANGED=$(git diff --cached --name-only | grep '^ubs$' || true)
+
+if [[ -n "$UBS_CHANGED" ]]; then
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "📝 ubs script changed - updating SHA256SUMS..."
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  # Update SHA256SUMS with new checksum
+  sha256sum ubs > SHA256SUMS
+
+  echo "✓ SHA256SUMS updated"
+  echo "  Automatically staging SHA256SUMS..."
+  git add SHA256SUMS
+  echo "  ✓ Staged"
+  echo ""
+fi
+
 # Always verify checksums match before allowing commit
 echo "Verifying all checksums match..."
 if ! ./scripts/verify_checksums.sh; then
