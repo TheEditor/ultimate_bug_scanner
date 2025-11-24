@@ -1363,6 +1363,7 @@ run_post_install_doctor() {
   local installed_bin="$1"
   local install_dir="$2"
   local note=""
+  local status="PASS"
   if [ "$RUN_DOCTOR" -ne 1 ]; then
     write_session_summary "SKIPPED" "" "$install_dir" "disabled via flag"
     return 0
@@ -1380,7 +1381,6 @@ run_post_install_doctor() {
   log "Running 'ubs doctor' (post-install health check)..."
   local doctor_log
   doctor_log="$(mktemp_in_workdir "doctor.log.XXXXXX")"
-  local status="PASS"
   note="All checks passed"
   if NO_COLOR=1 "$installed_bin" doctor >"$doctor_log" 2>&1; then
     success "'ubs doctor' completed without issues"
@@ -1388,6 +1388,21 @@ run_post_install_doctor() {
     warn "'ubs doctor' reported issues"
     status="FAIL"
     note="Review output above or run 'ubs doctor --fix'. View latest log via 'ubs sessions --entries 1'."
+    if grep -qi "checksum" "$doctor_log"; then
+      log "Checksum issues detected; running 'ubs doctor --fix' automatically..."
+      {
+        echo ""
+        echo "---- auto doctor --fix ----"
+      } >>"$doctor_log"
+      if NO_COLOR=1 "$installed_bin" doctor --fix >>"$doctor_log" 2>&1; then
+        success "'ubs doctor --fix' resolved checksum issues"
+        status="PASS"
+        note="Checksum issues auto-fixed by installer"
+      else
+        warn "'ubs doctor --fix' did not resolve issues"
+        note="Auto-fix attempted; review log or rerun manually"
+      fi
+    fi
   fi
   write_session_summary "$status" "$doctor_log" "$install_dir" "$note"
 }
