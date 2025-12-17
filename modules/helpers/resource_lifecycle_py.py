@@ -132,11 +132,9 @@ class Analyzer(ast.NodeVisitor):
 
     def _handle_assignment(self, targets: list[ast.expr], value: ast.AST) -> None:
         sig = self._call_signature_from_expr(value)
-        print(f"Assign val={value}, sig={sig}", file=sys.stderr)
         if not sig:
             return
         kind = TARGET_SIGS.get(sig)
-        print(f"Kind={kind}", file=sys.stderr)
         if not kind:
             return
         self.assigned_calls.add(id(value))
@@ -303,7 +301,6 @@ def analyze(path: Path, root: Path) -> list[str]:
 
 
 def main() -> None:
-    print("Starting main...", file=sys.stderr)
     if len(sys.argv) != 2:
         print("usage: resource_lifecycle_py.py <project_dir>", file=sys.stderr)
         sys.exit(2)

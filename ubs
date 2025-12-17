@@ -38,7 +38,7 @@ else
 fi
 CHECK="✓"; WARN="⚠"; INFO="ℹ"; X="✗"
 say(){
-  if [[ "${FORMAT:-text}" == "json" || "${FORMAT:-text}" == "sarif" ]]; then
+  if [[ "${FORMAT:-text}" == "json" || "${FORMAT:-text}" == "jsonl" || "${FORMAT:-text}" == "sarif" ]]; then
     echo -e "$*" >&2
   else
     echo -e "$*"
@@ -127,6 +127,7 @@ SARIF_AUTOMATION_ID=""
 SHOW_VERSION=0
 BEADS_JSONL_PATH=""
 SUGGEST_IGNORE=0
+JSONL_DETAIL=1               # 1=include findings, 0=summary only (for backward compat)
 
 if [[ "${1:-}" == "doctor" ]]; then
   MODE="doctor"
@@ -155,7 +156,8 @@ Options:
   --comparison=FILE       Baseline JSON to diff combined results against
   --report-json=FILE      Write combined summary JSON to FILE
   --html-report=FILE      Emit shareable HTML report to FILE
-  --beads-jsonl=FILE      Also write combined findings summary as JSONL for Beads/strung
+  --beads-jsonl=FILE      Also write combined findings to JSONL for Beads/strung
+  --jsonl-summary-only    JSONL output: emit only summary counts, no individual findings
   --suggest-ignore        Print large-directory ignore suggestions (without modifying files)
   --update-modules        Force re-download of modules before run
   --jobs=N                Parallelism hint (passed to children if supported)
@@ -323,6 +325,7 @@ else
         if [[ $# -lt 2 ]]; then usage; exit 2; fi
         shift; BEADS_JSONL_PATH="$1"; shift;;
       --suggest-ignore) SUGGEST_IGNORE=1; shift;;
+      --jsonl-summary-only) JSONL_DETAIL=0; shift;;
       --ignore-file=*) IGNORE_FILE="${1#*=}"; shift;;
       --module-dir=*) MODULE_DIR="${1#*=}"; shift;;
       --module-dir)
@@ -1149,6 +1152,7 @@ run_lang(){
   local out_txt="$TMPDIR_RUN/$lang.txt"
   local out_json="$TMPDIR_RUN/$lang.json"
   local out_sarif="$TMPDIR_RUN/$lang.sarif"
+  local out_findings="$TMPDIR_RUN/$lang.findings.json"
   local err="$TMPDIR_RUN/$lang.err"
   local status_file="$TMPDIR_RUN/$lang.status"
   local metrics_dir="$TMPDIR_RUN/$lang.metrics"
@@ -1171,7 +1175,8 @@ run_lang(){
   case "$fmt" in
     json|jsonl)
       prepare_metrics_dir "$metrics_dir"
-      if UBS_METRICS_DIR="$metrics_dir" UBS_LANG="$lang" UBS_SKIP_TYPE_NARROWING="$SKIP_TYPE_NARROWING" "$module" "${args[@]}" --format=json >"$out_json" 2>"$err"; then
+      # Add --report-json to capture detailed findings (module writes to file, separate from stdout)
+      if UBS_METRICS_DIR="$metrics_dir" UBS_LANG="$lang" UBS_SKIP_TYPE_NARROWING="$SKIP_TYPE_NARROWING" "$module" "${args[@]}" --report-json="$out_findings" --format=json >"$out_json" 2>"$err"; then
         module_status=$?
         restore_original_paths "$out_json"
         if need_cmd jq && jq -e . "$out_json" >/dev/null 2>&1; then
@@ -1184,7 +1189,8 @@ run_lang(){
         module_status=$?
       fi
       prepare_metrics_dir "$metrics_dir"
-      if ! UBS_METRICS_DIR="$metrics_dir" UBS_LANG="$lang" UBS_SKIP_TYPE_NARROWING="$SKIP_TYPE_NARROWING" "$module" "${args[@]}" | apply_inline_suppressions >"$out_txt" 2>>"$err"; then
+      # Fallback: run in text mode but still capture findings via --report-json
+      if ! UBS_METRICS_DIR="$metrics_dir" UBS_LANG="$lang" UBS_SKIP_TYPE_NARROWING="$SKIP_TYPE_NARROWING" "$module" "${args[@]}" --report-json="$out_findings" | apply_inline_suppressions >"$out_txt" 2>>"$err"; then
         module_status=$?
       fi
       restore_original_paths "$out_txt"
@@ -1304,11 +1310,21 @@ SARIF
 }
 
 merge_json_scanners(){
-  local jsons=( "$TMPDIR_RUN"/*.json )
+  # Exclude *.findings.json from summary merge (those are detailed findings)
+  local jsons=()
+  for f in "$TMPDIR_RUN"/*.json; do
+    [[ "$f" == *.findings.json ]] && continue
+    [[ -f "$f" ]] && jsons+=("$f")
+  done
+  if [[ ${#jsons[@]} -eq 0 ]]; then
+    say "${YELLOW}${WARN}${RESET} No scanner JSON files found"; return 1
+  fi
   if ! need_cmd jq; then
     say "${YELLOW}${WARN}${RESET} jq not found; cannot emit combined JSON"; return 1
   fi
-  jq -s --arg project "$PROJECT_DIR" --arg ts "$(date_iso)" '
+  # First merge the summary JSONs
+  local base_json
+  base_json=$(jq -s --arg project "$PROJECT_DIR" --arg ts "$(date_iso)" '
     def nz(x): if (x|type)=="number" then x else 0 end;
     {project:$project, timestamp:$ts, scanners: .,
      totals:{
@@ -1316,7 +1332,40 @@ merge_json_scanners(){
        warning:  (map(.warning  // 0) | add),
        info:     (map(.info     // 0) | add),
        files:    (map(.files    // 0) | add)
-     }}' "${jsons[@]}"
+     }}' "${jsons[@]}")
+
+  # Now merge in findings from *.findings.json files (if any exist)
+  local findings_jsons=( "$TMPDIR_RUN"/*.findings.json )
+  if [[ -f "${findings_jsons[0]}" ]]; then
+    # Build a map of language -> findings array
+    local findings_map="{}"
+    local fm_parts=""
+    for f in "${findings_jsons[@]}"; do
+      [[ -f "$f" ]] || continue
+      local lang_name
+      lang_name=$(basename "$f" .findings.json)
+      local part
+      part=$(jq -c --arg lang "$lang_name" '{($lang): .findings}' "$f" 2>/dev/null) || continue
+      [[ -n "$part" ]] && fm_parts+="$part"$'\n'
+    done
+    if [[ -n "$fm_parts" ]]; then
+      findings_map=$(printf '%s' "$fm_parts" | jq -s 'add // {}')
+    fi
+
+    # Merge findings into each scanner entry (only if we have valid findings_map)
+    if [[ -n "$findings_map" && "$findings_map" != "{}" && "$findings_map" != "null" ]]; then
+      echo "$base_json" | jq --argjson fm "$findings_map" '
+        .scanners |= map(
+          if .language and $fm[.language] then
+            . + {findings: $fm[.language]}
+          else . end
+        )'
+    else
+      echo "$base_json"
+    fi
+  else
+    echo "$base_json"
+  fi
 }
 
 generate_combined_json(){
@@ -1329,20 +1378,41 @@ generate_combined_json(){
 
 merge_sarif_runs(){
   local sarifs=( "$TMPDIR_RUN"/*.sarif )
+  # Check if any sarif files exist (glob might expand to literal if no matches)
+  if [[ ${#sarifs[@]} -eq 0 ]] || [[ ! -f "${sarifs[0]}" ]]; then
+    say "${YELLOW}${WARN}${RESET} No SARIF files found to merge"
+    echo '{"version":"2.1.0","runs":[]}'
+    return 0
+  fi
   if ! need_cmd jq; then
     say "${YELLOW}${WARN}${RESET} jq not found; cannot merge SARIF; printing first artifact"; cat "${sarifs[0]}"; return 0
   fi
+  # Filter to only valid JSON files
+  local valid_sarifs=()
+  for f in "${sarifs[@]}"; do
+    if [[ -f "$f" ]] && jq -e . "$f" >/dev/null 2>&1; then
+      valid_sarifs+=("$f")
+    else
+      say_err "${DIM}Skipping invalid SARIF: $f${RESET}"
+    fi
+  done
+  if [[ ${#valid_sarifs[@]} -eq 0 ]]; then
+    say "${YELLOW}${WARN}${RESET} No valid SARIF files to merge"
+    echo '{"version":"2.1.0","runs":[]}'
+    return 0
+  fi
   # Accept either raw SARIF root or wrapped under "sarifLog"
+  # Note: (... | add) // [] handles the case where add returns null (empty/null arrays)
   jq -s --arg repo "$GIT_REMOTE_HTTP" --arg rev "$GIT_COMMIT_SHA" --arg auto "$SARIF_AUTOMATION_ID" '
     def toRuns(x):
-      if x.sarifLog? then x.sarifLog.runs
-      elif x.version? and x.runs? then x.runs
+      if x.sarifLog? then (x.sarifLog.runs // [])
+      elif x.version? and x.runs? then (x.runs // [])
       else [] end;
     def attachMeta(run):
       (if ($repo|length) > 0 then run + {versionControlProvenance:[{repositoryUri:$repo, revisionId:$rev}]}
        else run end)
       | (if ($auto|length) > 0 then . + {automationDetails:{id:$auto}} else . end);
-    {"version":"2.1.0","runs": (map(toRuns(.)) | add | map(attachMeta))}' "${sarifs[@]}"
+    {"version":"2.1.0","runs": ((map(toRuns(.)) | add) // [] | map(attachMeta(.)))}' "${valid_sarifs[@]}"
 }
 
 write_jsonl_summary(){
@@ -1351,13 +1421,32 @@ write_jsonl_summary(){
   local tmp="$TMPDIR_RUN/combined.jsonl"
   local ts="$(date_iso)"
   if ! need_cmd jq; then return 1; fi
-  jq -c --arg project "$SOURCE_PROJECT_DIR" --arg ts "$ts" '
-    .scanners[] | {type:"scanner", project:$project, language, files, critical, warning, info, timestamp:(.timestamp // $ts)}
-  ' "$COMBINED_JSON_FILE" >"$tmp"
+
+  if [[ "${JSONL_DETAIL:-1}" -eq 1 ]]; then
+    # Detailed mode: emit each finding as its own JSONL line
+    jq -c --arg project "$SOURCE_PROJECT_DIR" --arg ts "$ts" '
+      .scanners[] as $s |
+      ($s.findings // [])[] |
+      {type:"finding", project:$project, language:$s.language} + .
+    ' "$COMBINED_JSON_FILE" >"$tmp" 2>/dev/null || true
+
+    # Also emit scanner summaries
+    jq -c --arg project "$SOURCE_PROJECT_DIR" --arg ts "$ts" '
+      .scanners[] | {type:"scanner", project:$project, language, files, critical, warning, info, timestamp:(.timestamp // $ts)}
+    ' "$COMBINED_JSON_FILE" >>"$tmp"
+  else
+    # Summary-only mode (legacy behavior)
+    jq -c --arg project "$SOURCE_PROJECT_DIR" --arg ts "$ts" '
+      .scanners[] | {type:"scanner", project:$project, language, files, critical, warning, info, timestamp:(.timestamp // $ts)}
+    ' "$COMBINED_JSON_FILE" >"$tmp"
+  fi
+
+  # Always emit totals
   jq -c --arg project "$SOURCE_PROJECT_DIR" --arg ts "$ts" '
     {type:"totals", project:$project, files:(.totals.files//0), critical:(.totals.critical//0),
      warning:(.totals.warning//0), info:(.totals.info//0), timestamp:(.timestamp // $ts)}
   ' "$COMBINED_JSON_FILE" >>"$tmp"
+
   if [[ -n "$dest" ]]; then
     mkdir -p "$(dirname "$dest")"
     cp "$tmp" "$dest"
