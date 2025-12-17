@@ -31,16 +31,38 @@ type resource struct {
 	released bool
 }
 
+type scope struct {
+	byName map[string][]*resource
+}
+
+func newScope() *scope {
+	return &scope{byName: make(map[string][]*resource)}
+}
+
 type analyzer struct {
-	fset      *token.FileSet
-	resources []*resource
-	byName    map[string][]*resource
+	fset       *token.FileSet
+	resources  []*resource
+	scopeStack []*scope
 }
 
 func newAnalyzer(fset *token.FileSet) *analyzer {
 	return &analyzer{
-		fset:   fset,
-		byName: make(map[string][]*resource),
+		fset:       fset,
+		scopeStack: []*scope{newScope()}, // global scope
+	}
+}
+
+func (a *analyzer) currentScope() *scope {
+	return a.scopeStack[len(a.scopeStack)-1]
+}
+
+func (a *analyzer) pushScope() {
+	a.scopeStack = append(a.scopeStack, newScope())
+}
+
+func (a *analyzer) popScope() {
+	if len(a.scopeStack) > 1 {
+		a.scopeStack = a.scopeStack[:len(a.scopeStack)-1]
 	}
 }
 
@@ -48,15 +70,27 @@ func (a *analyzer) add(name string, kind resourceKind, pos token.Position) {
 	res := &resource{name: name, kind: kind, position: pos}
 	a.resources = append(a.resources, res)
 	if name != "" {
-		a.byName[name] = append(a.byName[name], res)
+		s := a.currentScope()
+		s.byName[name] = append(s.byName[name], res)
 	}
+}
+
+func (a *analyzer) lookup(name string) []*resource {
+	// Look up from innermost scope to outer
+	for i := len(a.scopeStack) - 1; i >= 0; i-- {
+		s := a.scopeStack[i]
+		if entries, ok := s.byName[name]; ok {
+			return entries
+		}
+	}
+	return nil
 }
 
 func (a *analyzer) markReleased(name string, kinds ...resourceKind) {
 	if name == "" {
 		return
 	}
-	entries := a.byName[name]
+	entries := a.lookup(name)
 	for _, res := range entries {
 		if res.released {
 			continue
@@ -77,14 +111,183 @@ func containsKind(kinds []resourceKind, target resourceKind) bool {
 	return false
 }
 
-func (a *analyzer) inspect(node ast.Node) bool {
+// Visit implements ast.Visitor.
+func (a *analyzer) Visit(node ast.Node) ast.Visitor {
+	if node == nil {
+		return nil
+	}
+
 	switch n := node.(type) {
+	// Scope-creating nodes: manual walk with push/pop
+	case *ast.FuncDecl:
+		a.pushScope()
+		if n.Recv != nil {
+			ast.Walk(a, n.Recv)
+		}
+		if n.Type != nil {
+			ast.Walk(a, n.Type)
+		}
+		if n.Body != nil {
+			ast.Walk(a, n.Body)
+		}
+		a.popScope()
+		return nil
+	case *ast.FuncLit:
+		a.pushScope()
+		if n.Type != nil {
+			ast.Walk(a, n.Type)
+		}
+		if n.Body != nil {
+			ast.Walk(a, n.Body)
+		}
+		a.popScope()
+		return nil
+	case *ast.BlockStmt:
+		a.pushScope()
+		for _, stmt := range n.List {
+			ast.Walk(a, stmt)
+		}
+		a.popScope()
+		return nil
+	case *ast.IfStmt:
+		a.pushScope()
+		if n.Init != nil {
+			ast.Walk(a, n.Init)
+		}
+		if n.Cond != nil {
+			ast.Walk(a, n.Cond)
+		}
+		if n.Body != nil {
+			ast.Walk(a, n.Body)
+		}
+		if n.Else != nil {
+			ast.Walk(a, n.Else)
+		}
+		a.popScope()
+		return nil
+	case *ast.ForStmt:
+		a.pushScope()
+		if n.Init != nil {
+			ast.Walk(a, n.Init)
+		}
+		if n.Cond != nil {
+			ast.Walk(a, n.Cond)
+		}
+		if n.Post != nil {
+			ast.Walk(a, n.Post)
+		}
+		if n.Body != nil {
+			ast.Walk(a, n.Body)
+		}
+		a.popScope()
+		return nil
+	case *ast.RangeStmt:
+		a.pushScope()
+		if n.Key != nil {
+			ast.Walk(a, n.Key)
+		}
+		if n.Value != nil {
+			ast.Walk(a, n.Value)
+		}
+		if n.X != nil {
+			ast.Walk(a, n.X)
+		}
+		if n.Body != nil {
+			ast.Walk(a, n.Body)
+		}
+		a.popScope()
+		return nil
+	case *ast.SwitchStmt:
+		a.pushScope()
+		if n.Init != nil {
+			ast.Walk(a, n.Init)
+		}
+		if n.Tag != nil {
+			ast.Walk(a, n.Tag)
+		}
+		if n.Body != nil {
+			ast.Walk(a, n.Body)
+		}
+		a.popScope()
+		return nil
+	case *ast.TypeSwitchStmt:
+		a.pushScope()
+		if n.Init != nil {
+			ast.Walk(a, n.Init)
+		}
+		if n.Assign != nil {
+			ast.Walk(a, n.Assign)
+		}
+		if n.Body != nil {
+			ast.Walk(a, n.Body)
+		}
+		a.popScope()
+		return nil
+	case *ast.SelectStmt:
+		a.pushScope()
+		if n.Body != nil {
+			ast.Walk(a, n.Body)
+		}
+		a.popScope()
+		return nil
+	case *ast.CaseClause:
+		a.pushScope()
+		for _, expr := range n.List {
+			ast.Walk(a, expr)
+		}
+		for _, stmt := range n.Body {
+			ast.Walk(a, stmt)
+		}
+		a.popScope()
+		return nil
+	case *ast.CommClause:
+		a.pushScope()
+		if n.Comm != nil {
+			ast.Walk(a, n.Comm)
+		}
+		for _, stmt := range n.Body {
+			ast.Walk(a, stmt)
+		}
+		a.popScope()
+		return nil
+
+	// Logic nodes
 	case *ast.AssignStmt:
 		a.handleAssign(n)
+		return a
 	case *ast.CallExpr:
 		a.handleCall(n)
+		return a
+	case *ast.ReturnStmt:
+		a.handleReturn(n)
+		return a
 	}
-	return true
+
+	return a
+}
+
+func (a *analyzer) handleReturn(ret *ast.ReturnStmt) {
+	for _, res := range ret.Results {
+		if id, ok := res.(*ast.Ident); ok {
+			a.markReleasedAllScopes(id.Name)
+		}
+	}
+}
+
+func (a *analyzer) markReleasedAllScopes(name string) {
+	if name == "" {
+		return
+	}
+	// Traverse all scopes
+	for _, scope := range a.scopeStack {
+		if entries, ok := scope.byName[name]; ok {
+			for _, res := range entries {
+				if !res.released {
+					res.released = true
+				}
+			}
+		}
+	}
 }
 
 func (a *analyzer) handleAssign(assign *ast.AssignStmt) {
@@ -92,10 +295,6 @@ func (a *analyzer) handleAssign(assign *ast.AssignStmt) {
 		return
 	}
 
-	// Handle multi-assignment: a, b := f(), g()
-	// Or single multi-return: a, b := f()
-
-	// Case 1: Single RHS expression (function returning multiple values)
 	if len(assign.Rhs) == 1 {
 		call, ok := assign.Rhs[0].(*ast.CallExpr)
 		if !ok {
@@ -110,7 +309,6 @@ func (a *analyzer) handleAssign(assign *ast.AssignStmt) {
 
 		switch kind {
 		case kindContext:
-			// expect cancel func as last name
 			if len(names) >= 2 {
 				name := names[len(names)-1]
 				if name == "_" {
@@ -121,7 +319,6 @@ func (a *analyzer) handleAssign(assign *ast.AssignStmt) {
 				a.add("", kind, pos)
 			}
 		default:
-			// For other resources, the resource is usually the first return value
 			if len(names) > 0 {
 				name := names[0]
 				if name != "" && name != "_" {
@@ -132,8 +329,6 @@ func (a *analyzer) handleAssign(assign *ast.AssignStmt) {
 		return
 	}
 
-	// Case 2: Multiple RHS expressions (parallel assignment)
-	// a, b := f(), g()
 	if len(assign.Lhs) == len(assign.Rhs) {
 		names := collectNames(assign.Lhs)
 		for i, expr := range assign.Rhs {
@@ -145,18 +340,10 @@ func (a *analyzer) handleAssign(assign *ast.AssignStmt) {
 			if kind == "" {
 				continue
 			}
-			// In parallel assignment, each RHS returns 1 value (or it's invalid Go)
-			// But our tracked resources (os.Open) return (val, err), so they CANNOT appear here
-			// EXCEPT: time.NewTicker returns *Ticker (1 value).
-			// So we only track single-value returns here.
-
 			name := names[i]
 			if name == "" || name == "_" {
 				continue
 			}
-
-			// Context/Open return multiple values, so they won't be here.
-			// Ticker/Timer return 1 value.
 			if kind == kindTicker || kind == kindTimer {
 				a.add(name, kind, a.fset.Position(assign.Pos()))
 			}
@@ -252,7 +439,7 @@ func analyzeFile(path, root string) ([]string, error) {
 		return nil, err
 	}
 	visitor := newAnalyzer(fset)
-	ast.Inspect(file, visitor.inspect)
+	ast.Walk(visitor, file)
 
 	rel, err := filepath.Rel(root, path)
 	if err != nil {
@@ -297,13 +484,13 @@ func formatMessage(kind resourceKind, name string) string {
 }
 
 var ignoreDirs = map[string]struct{}{
-	".git":         {},
-	"vendor":       {},
+	".git":       {},
+	"vendor":      {},
 	"node_modules": {},
-	"testdata":     {},
-	"dist":         {},
-	"build":        {},
-	"bin":          {},
+	"testdata":    {},
+	"dist":        {},
+	"build":       {},
+	"bin":         {},
 }
 
 func collectGoFiles(root string) ([]string, error) {
