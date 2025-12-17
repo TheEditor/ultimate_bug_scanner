@@ -194,7 +194,7 @@ EXPLAIN_RULE_ID=""
 die(){ echo -e "${RED}${BOLD}fatal:${RESET} ${WHITE}$*${RESET}" >&2; exit 2; }
 
 CATEGORY_WHITELIST=""
-case "${SUBS_CATEGORY_FILTER:-}" in
+case "${UBS_CATEGORY_FILTER:-}" in
  resource-lifecycle) CATEGORY_WHITELIST="16,19" ;;
 esac
 
@@ -326,7 +326,7 @@ Options:
  --no-ignore Ignore ALL ignore files for ripgrep (maximum coverage)
 
 Env:
-  JOBS, NO_COLOR, CI, TIMEOUT_SECONDS, MAX_FILE_SIZE, SUBS_CATEGORY_FILTER
+  JOBS, NO_COLOR, CI, TIMEOUT_SECONDS, MAX_FILE_SIZE, UBS_CATEGORY_FILTER
  UBS_PROFILE=loose to auto-skip categories (11,15,22)
   UBS_INCLUDE_OPTIONALS_IN_TOTALS=1 to include external analyzer counts
 Args:
