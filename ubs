@@ -384,7 +384,7 @@ if [[ -n "$CATEGORY_FILTER" ]]; then
   if [[ "$CATEGORY_FILTER" == "resource-lifecycle" ]]; then
     SHAREABLE_MODE=$((SHAREABLE_MODE+0))
     if [[ -z "$ONLY_LANGS" ]]; then
-      ONLY_LANGS="python,golang,java"
+      ONLY_LANGS="python,golang,java,swift"
     fi
     export UBS_CATEGORY_FILTER="$CATEGORY_FILTER"
   else
