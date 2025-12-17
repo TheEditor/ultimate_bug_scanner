@@ -900,7 +900,7 @@ else
   print_finding "good" "No nil equality comparisons"
 fi
 
-print_subheader "Deep method chains (use &. / guards)"
+print_subheader "Deep method chains (use &. or guards)"
 deep_chain_json=""
 guarded_chain_count=0
 count=
@@ -1100,8 +1100,6 @@ count=$("${GREP_RN[@]}" -e "(^|[^A-Za-z0-9_])(eval|instance_eval|class_eval)[[:s
 if [ "$count" -gt 0 ]; then
   print_finding "critical" "$count" "eval*/_*eval present" "Avoid executing dynamic code"
   show_detailed_finding "(^|[^A-Za-z0-9_])(eval|instance_eval|class_eval)[[:space:]]*\(" 5
-else
-  print_finding "good" "No eval*/_*eval detected"
 fi
 
 print_subheader "Marshal/YAML unsafe loads"
@@ -1521,6 +1519,23 @@ import json, sys
 from collections import OrderedDict
 path = sys.argv[1]
 stats = OrderedDict()
+file_cache = {}
+
+def check_suppression(fpath, line_no):
+    if not fpath or line_no <= 0: return False
+    if fpath not in file_cache:
+        try:
+            with open(fpath, 'r', encoding='utf-8', errors='ignore') as src:
+                file_cache[fpath] = src.readlines()
+        except Exception:
+            file_cache[fpath] = []
+    
+    lines = file_cache[fpath]
+    idx = line_no - 1
+    if 0 <= idx < len(lines) and 'ubs:ignore' in lines[idx]: return True
+    if 0 <= idx - 1 < len(lines) and 'ubs:ignore' in lines[idx-1]: return True
+    return False
+
 with open(path, 'r', encoding='utf-8') as fh:
     for line in fh:
         line=line.strip()
@@ -1532,6 +1547,9 @@ with open(path, 'r', encoding='utf-8') as fh:
         start = rng.get('start') or {}
         line_no = start.get('row', 0) + 1
         file_path = obj.get('file', '?')
+        
+        if check_suppression(file_path, line_no): continue
+
         entry = stats.setdefault(rid, {'count': 0, 'samples': []})
         entry['count'] += 1
         if len(entry['samples']) < 3:

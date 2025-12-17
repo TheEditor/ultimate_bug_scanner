@@ -745,6 +745,23 @@ import json, sys
 from collections import OrderedDict
 path = sys.argv[1]
 stats = OrderedDict()
+file_cache = {}
+
+def check_suppression(fpath, line_no):
+    if not fpath or line_no <= 0: return False
+    if fpath not in file_cache:
+        try:
+            with open(fpath, 'r', encoding='utf-8', errors='ignore') as src:
+                file_cache[fpath] = src.readlines()
+        except Exception:
+            file_cache[fpath] = []
+    
+    lines = file_cache[fpath]
+    idx = line_no - 1
+    if 0 <= idx < len(lines) and 'ubs:ignore' in lines[idx]: return True
+    if 0 <= idx - 1 < len(lines) and 'ubs:ignore' in lines[idx-1]: return True
+    return False
+
 with open(path, 'r', encoding='utf-8') as fh:
     for line in fh:
         line=line.strip()
@@ -759,6 +776,9 @@ with open(path, 'r', encoding='utf-8') as fh:
         start=rng.get('start') or {}
         line_no=(start.get('row', 0) + 1)
         file_path=obj.get('file','?')
+        
+        if check_suppression(file_path, line_no): continue
+
         entry=stats.setdefault(rid, {'count':0,'samples':[]})
         entry['count']+=1
         if len(entry['samples'])<3:
@@ -988,7 +1008,7 @@ rule:
   inside:
     pattern: BigDecimal $BD_NAME = $BD_EXPR;
 severity: info
-message: "BigDecimal.equals checks scale; prefer compareTo() == 0 for numeric equality"
+message: "BigDecimal.equals checks scale; prefer compareTo()==0 for numeric equality"
 YAML
 
   # ====== Concurrency ======
@@ -1039,7 +1059,7 @@ id: java.resource.thread-no-join
 language: java
 rule:
   pattern: |
-    Thread $T = new Thread($ARGS);
+    Thread $T = new Thread($$);
     $T.start();
   not:
     inside:
@@ -1594,7 +1614,7 @@ print_subheader "Optional.isPresent() followed by get()"
 isp_get_ast=$(ast_search 'if ($O.isPresent()) { $$ $O.get() $$ }' || echo 0)
 if [ "$isp_get_ast" -gt 0 ]; then print_finding "info" "$isp_get_ast" "isPresent()+get() pattern"; fi
 
-print_subheader "Null checks using '==' with Strings (prefer Objects.equals)"
+print_subheader "Null checks using '==' with Strings (prefer Objects.isNull/nonNull where expressive)"
 str_eq_null=$("${GREP_RN[@]}" -e "==[[:space:]]*null|null[[:space:]]*==" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
 if [ "$str_eq_null" -gt 0 ]; then print_finding "info" "$str_eq_null" "Null equality checks present - consider Objects.isNull/nonNull where expressive"; fi
 
@@ -2141,8 +2161,1786 @@ log_throwable_pos=$("${GREP_RN[@]}" -e "\.(trace|debug|info|warn|error)\s*\(.*Th
 if [ "$log_throwable_pos" -gt 0 ]; then print_finding "info" "$log_throwable_pos" "Throwable not last in logger call"; fi
 fi
 
-# restore pipefail
-end_scan_section
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 23: RESOURCE SAFETY & RESOURCE LIFECYCLE CORRELATION
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 23; then
+print_header "23. RESOURCE SAFETY & RESOURCE LIFECYCLE CORRELATION"
+print_category "Detects: stream/reader/writer creation; nudge toward try-with-resources" \
+  "Prefer try-with-resources to ensure deterministic close()"
+
+print_subheader "I/O stream/reader/writer instantiations (audit for try-with-resources)"
+io_ctor=$("${GREP_RN[@]}" -e "new[[:space:]]+(File(Input|Output)Stream|FileReader|FileWriter|Buffered(Input|Output)Stream|Buffered(Reader|Writer)|InputStreamReader|OutputStreamWriter|PrintWriter|Scanner)\s*\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$io_ctor" -gt 0 ]; then
+  print_finding "info" "$io_ctor" "I/O constructors present - ensure try-with-resources"
+  show_detailed_finding "new[[:space:]]+(File(Input|Output)Stream|FileReader|FileWriter|Buffered(Input|Output)Stream|Buffered(Reader|Writer)|InputStreamReader|OutputStreamWriter|PrintWriter|Scanner)\s*\(" 5
+else
+  print_finding "good" "No I/O constructors detected"
+fi
+
+print_subheader "ExecutorService shutdown tracking"
+exec_leak=$("${GREP_RN[@]}" -e "ExecutorService[[:space:]]+[A-Za-z0-9_]+[[:space:]]*=\s*Executors\." "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$exec_leak" -gt 0 ]; then
+  print_finding "warning" "$exec_leak" "ExecutorService created without shutdown" "Call shutdown()/shutdownNow() in finally blocks"
+  show_detailed_finding "ExecutorService[[:space:]]+[A-Za-z0-9_]+[[:space:]]*=\s*Executors\." 3
+fi
+
+run_resource_lifecycle_checks
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 24: PATH HANDLING & FILESYSTEM
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 24; then
+print_header "24. PATH HANDLING & FILESYSTEM"
+print_category "Detects: Paths.get with '+', unchecked delete(), risky temp file patterns" \
+  "Use platform-safe composition and verify filesystem effects"
+
+print_subheader "Paths.get with '+' concatenation"
+paths_plus=$(( $(ast_search 'java.nio.file.Paths.get($A + $B)' || echo 0) + $("${GREP_RN[@]}" -e "Paths\.get\([^)]*\+[^)]*\)" "$PROJECT_DIR" 2>/dev/null | count_lines || true) ))
+if [ "$paths_plus" -gt 0 ]; then print_finding "info" "$paths_plus" "Paths.get with '+' - prefer resolve()/varargs"; fi
+
+print_subheader "Unchecked File.delete()"
+del_unchecked=$("${GREP_RN[@]}" -e "\.delete\(\)\s*;" "$PROJECT_DIR" 2>/dev/null | (grep -vE "if\s*\(|assert|check|ensure|\\?:" || true) | count_lines)
+if [ "$del_unchecked" -gt 0 ]; then print_finding "info" "$del_unchecked" "File.delete() return value not checked"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 25: HARD-CODED SECRETS (heuristics)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 25; then
+print_header "25. HARD-CODED SECRETS (HEURISTICS)"
+print_category "Detects: string literals bound to secret-like identifiers" \
+  "Avoid storing secrets in source; prefer env/secret manager"
+
+print_subheader "Probable hard-coded secrets"
+secrets_ast=$(ast_search 'String $K = $V;' || echo 0)
+secrets_rg=$("${GREP_RNI[@]}" -e "(password|passwd|pwd|secret|token|api[_-]?key|auth|credential)[[:space:]]*=" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+secrets_total=$(( secrets_ast + secrets_rg ))
+if [ "$secrets_total" -gt 0 ]; then print_finding "warning" "$secrets_total" "Potential hard-coded secrets found"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 26: LOGGING BEST PRACTICES (SLF4J-style)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 26; then
+print_header "26. LOGGING BEST PRACTICES"
+print_category "Detects: concatenation in logger calls, Throwable lost at end" \
+  "Prefer parameterized logging; include Throwable as last argument"
+
+print_subheader "Logger calls with concatenation (extended)"
+log_concat_more=$("${GREP_RN[@]}" -e "\.(trace|debug|info|warn|error)\s*\([^)]*\+[^)]*\)" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$log_concat_more" -gt 0 ]; then print_finding "info" "$log_concat_more" "Concatenation in log calls - use placeholders"; fi
+
+print_subheader "Logger calls with Throwable not last (heuristic)"
+log_throwable_pos=$("${GREP_RN[@]}" -e "\.(trace|debug|info|warn|error)\s*\(.*Throwable[[:space:]]*,[[:space:]]*[^)]*\)" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$log_throwable_pos" -gt 0 ]; then print_finding "info" "$log_throwable_pos" "Throwable not last in logger call"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 27: REGEX & STRING PITFALLS
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 27; then
+print_header "27. REGEX & STRING PITFALLS"
+print_category "Detects: ReDoS patterns, Pattern.compile with variables, toLowerCase/equals" \
+  "String/regex bugs cause performance issues and subtle mismatches"
+
+print_subheader "Nested quantifiers (ReDoS risk)"
+redos_cnt=$("${GREP_RN[@]}" -e "\([^)]*\+[^)]*\)\+|\([^)]*\*[^)]*\)\+" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$redos_cnt" -gt 0 ]; then print_finding "warning" "$redos_cnt" "Regex contains nested quantifiers - potential ReDoS"; show_detailed_finding "\([^)]*\+[^)]*\)\+|\([^)]*\*[^)]*\)\+" 3; fi
+
+print_subheader "Pattern.compile with variables (injection risk)"
+dyn_pat=$("${GREP_RN[@]}" -e "Pattern\.compile\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\)" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$dyn_pat" -gt 0 ]; then print_finding "info" "$dyn_pat" "Dynamic Pattern.compile detected - sanitize/escape user input"; fi
+
+print_subheader "Case handling via toLowerCase()/toUpperCase() then equals"
+case_cmp=$("${GREP_RN[@]}" -e "\.to(Lower|Upper)Case\(\)\.equals\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$case_cmp" -gt 0 ]; then print_finding "info" "$case_cmp" "Prefer equalsIgnoreCase or use Locale"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 28: COLLECTIONS & GENERICS
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 28; then
+print_header "28. COLLECTIONS & GENERICS"
+print_category "Detects: raw types, legacy Vector/Hashtable, remove in foreach" \
+  "Raw types and mutation during iteration cause runtime errors"
+
+print_subheader "Raw generic types (List/Map/Set without <...>)"
+raw_types=$("${GREP_RN[@]}" -e "\b(List|Map|Set)\s+[a-zA-Z_][a-zA-Z0-9_]*\s*(=|;)" "$PROJECT_DIR" 2>/dev/null | (grep -v '<' || true) | count_lines)
+if [ "$raw_types" -gt 0 ]; then print_finding "warning" "$raw_types" "Raw generic types used"; fi
+
+print_subheader "Legacy synchronized collections"
+legacy=$(( $(ast_search 'new java.util.Vector($$)' || echo 0) + $(ast_search 'new java.util.Hashtable($$)' || echo 0) + $("${GREP_RN[@]}" -e "new[[:space:]]+(Vector|Hashtable)\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true) ))
+if [ "$legacy" -gt 0 ]; then print_finding "info" "$legacy" "Vector/Hashtable detected"; fi
+
+print_subheader "Collection modification during foreach (heuristic)"
+mod_foreach=$("${GREP_RN[@]}" -e "for\s*\([^)]+:[^)]+\)\s*\{" "$PROJECT_DIR" 2>/dev/null | (grep -A3 -F ".remove(" || true) | (grep -c -F ".remove(" || true))
+mod_foreach=$(echo "$mod_foreach" | awk 'END{print $0+0}')
+if [ "$mod_foreach" -gt 0 ]; then print_finding "warning" "$mod_foreach" "Possible modification of collection during iteration"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 29: SWITCH & CONTROL FLOW
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 29; then
+print_header "29. SWITCH & CONTROL FLOW"
+print_category "Detects: fall-through (classic switch), switch without default" \
+  "Control flow bugs cause unexpected behavior"
+
+print_subheader "Classic switch fall-through (ignore '->' labels)"
+switch_count=$("${GREP_RN[@]}" -e "switch\s*\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+case_count=$("${GREP_RN[@]}" -e "case[[:space:]]+.*:" "$PROJECT_DIR" 2>/dev/null | (grep -v -- "->" || true) | count_lines || true)
+break_count=$("${GREP_RN[@]}" -e "\bbreak\s*;" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$case_count" -gt "$break_count" ] && [ "$case_count" -gt 0 ]; then
+  diff=$((case_count - break_count))
+  print_finding "warning" "$diff" "Switch cases may be missing break (classic switch)"
+fi
+
+print_subheader "Switch without default (classic switch)"
+default_count=$("${GREP_RN[@]}" -e "default[[:space:]]*:" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$switch_count" -gt "$default_count" ] && [ "$switch_count" -gt 0 ]; then
+  diff=$((switch_count - default_count))
+  print_finding "info" "$diff" "Some switch statements have no default case (classic syntax)"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 30: SERIALIZATION & COMPATIBILITY
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 30; then
+print_header "30. SERIALIZATION & COMPATIBILITY"
+print_category "Detects: implements Serializable, readObject/writeObject" \
+  "Serialization hazards and maintenance burdens"
+
+print_subheader "Serializable implementations (inventory)"
+serializable=$("${GREP_RN[@]}" -e "implements\s+Serializable\b" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$serializable" -gt 0 ]; then print_finding "info" "$serializable" "Classes implement Serializable - audit necessity"; fi
+
+print_subheader "Custom readObject/writeObject methods"
+custom_ser=$("${GREP_RN[@]}" -e "void\s+readObject\s*\(|void\s+writeObject\s*\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$custom_ser" -gt 0 ]; then print_finding "info" "$custom_ser" "Custom serialization hooks present - validate invariants"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 31: JAVA 21 FEATURES (INFO)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 31; then
+print_header "31. JAVA 21 FEATURES (INFO)"
+print_category "Detects: Virtual Threads, Structured Concurrency, Sequenced Collections" \
+  "Inventory of modern APIs to guide reviews for correct usage"
+
+print_subheader "Virtual Threads"
+virt_threads=$(( $(ast_search 'java.lang.Thread.ofVirtual().start($$)' || echo 0) + $("${GREP_RN[@]}" -e "Thread\.ofVirtual\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true) ))
+if [ "$virt_threads" -gt 0 ]; then print_finding "info" "$virt_threads" "Virtual threads in use - ensure blocking operations are appropriate"; fi
+
+print_subheader "StructuredTaskScope"
+scope_cnt=$("${GREP_RN[@]}" -e "StructuredTaskScope" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$scope_cnt" -gt 0 ]; then print_finding "info" "$scope_cnt" "StructuredTaskScope in use - validate proper join/shutdown handling"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 32: SQL CONSTRUCTION (HEURISTICS)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 32; then
+print_header "32. SQL CONSTRUCTION (HEURISTICS)"
+print_category "Detects: string-concatenated SQL, Statement.executeQuery with + operator" \
+  "Prefer prepared statements with parameters to avoid injection"
+
+print_subheader "String-concatenated SQL"
+sql_concat=$("${GREP_RN[@]}" -e "\"(SELECT|INSERT|UPDATE|DELETE)[^\"]*\"[[:space:]]*\\+[[:space:]]*[A-Za-z0-9_]" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$sql_concat" -gt 0 ]; then
+  print_finding "warning" "$sql_concat" "SQL built via concatenation - prefer parameters"
+  show_detailed_finding "execute(Query|Update)\s*\([^)]*\+" 3
+fi
+
+print_subheader "Statement.executeQuery with concatenation"
+exec_concat=$("${GREP_RN[@]}" -e "execute(Query|Update)\s*\(" "$PROJECT_DIR" 2>/dev/null | (grep "\+" || true) | count_lines)
+if [ "$exec_concat" -gt 0 ]; then
+  print_finding "warning" "$exec_concat" "execute* called with concatenated query string"
+  show_detailed_finding "execute(Query|Update)\s*\([^)]*\+" 3
+elif [ "$sql_concat" -eq 0 ]; then
+  mapfile -t sql_meta < <(java_pattern_scan sql_concat)
+  sql_fallback="${sql_meta[0]:-0}"
+  sql_samples="${sql_meta[1]:-}"
+  if [ "${sql_fallback:-0}" -gt 0 ]; then
+    sql_desc="Prefer PreparedStatement parameters over string concatenation"
+    if [ -n "$sql_samples" ]; then
+      sql_desc+=" (e.g., ${sql_samples%%,*})"
+    fi
+    print_finding "warning" "$sql_fallback" "SQL built via concatenation - prefer parameters" "$sql_desc"
+  fi
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 33: ANNOTATIONS & NULLNESS (HEURISTICS)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 33; then
+print_header "33. ANNOTATIONS & NULLNESS (HEURISTICS)"
+print_category "Detects: @Nullable without guard (approx), @Deprecated usages" \
+  "Annotation-driven contracts must be respected"
+
+print_subheader "@Nullable parameters used without null guard (approx)"
+nullable_params=$("${GREP_RN[@]}" -e "@Nullable" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$nullable_params" -gt 0 ]; then print_finding "info" "$nullable_params" "@Nullable present - ensure null checks at use sites"; fi
+
+print_subheader "Usage of @Deprecated APIs"
+deprecated_use=$("${GREP_RN[@]}" -e "@Deprecated|@deprecated" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$deprecated_use" -gt 0 ]; then print_finding "info" "$deprecated_use" "Deprecated annotations present - verify migration plans"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 34: AST-GREP RULE PACK FINDINGS (JSON/SARIF passthrough)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 34; then
+print_header "34. AST-GREP RULE PACK FINDINGS"
+if [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_RULE_DIR" ]]; then
+  run_ast_rules || true
+  say "${DIM}${INFO} Above JSON/SARIF lines are ast-grep matches (id, message, severity, file/pos).${RESET}"
+  if [[ "$FORMAT" == "sarif" ]]; then
+    say "${DIM}${INFO} Tip: ${BOLD}${AST_GREP_CMD[*]} scan -r $AST_RULE_DIR \"$PROJECT_DIR\" --sarif > report.sarif${RESET}"
+  fi
+else
+  say "${YELLOW}${WARN} ast-grep scan subcommand unavailable; rule-pack mode skipped.${RESET}"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 35: BUILD HEALTH (Maven/Gradle best-effort)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 35; then
+print_header "35. BUILD HEALTH (Maven/Gradle)"
+print_category "Runs: compile/test-compile tasks; optional lint tasks if configured" \
+  "Ensures the project compiles; inventories warnings/errors"
+
+if [[ "$RUN_BUILD" -eq 1 ]]; then
+  # Maven compile
+  if [[ "$HAS_MAVEN" -eq 1 && -f "$PROJECT_DIR/pom.xml" ]]; then
+    MVN_BIN="${MVNW:-mvn}"
+    MVN_LOG="$(mktemp)"
+    run_cmd_log "$MVN_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$MVN_BIN\" -q -e -T1C -DskipTests=true -DskipITs=true -Dmaven.test.skip.exec=true -Dspotbugs.skip=true -Dpmd.skip=true -Dcheckstyle.skip=true -Denforcer.skip=true -Dgpg.skip=true -Dlicense.skip=true -Drat.skip=true -Djacoco.skip=true -Danimal.sniffer.skip=true -Dskip.npm -Dskip.yarn -Dskip.node -DskipFrontend -Dfrontend.skip=true -U -B compile"
+    mvn_ec=$(cat "$MVN_LOG.ec" 2>/dev/null || echo 0)
+    w_e=$(count_warnings_errors_text "$MVN_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+    if [[ "$mvn_ec" -ne 0 || "$e" -gt 0 ]]; then print_finding "critical" "$e" "Maven compile errors detected"; else print_finding "good" "Maven compile OK"; fi
+    if [[ "$w" -gt 0 ]]; then print_finding "warning" "$w" "Maven compile warnings"; fi
+  fi
+
+  # Gradle compile
+  if [[ "$HAS_GRADLE" -eq 1 && ( -f "$PROJECT_DIR/build.gradle" || -f "$PROJECT_DIR/build.gradle.kts" ) ]]; then
+    GR_BIN="${GRADLEW:-gradle}"
+    GR_TASKS="$(mktemp)"
+    run_cmd_log "$GR_TASKS" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q tasks --all"
+    GR_LOG="$(mktemp)"
+    run_cmd_log "$GR_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q classes testClasses -x test"
+    gr_ec=$(cat "$GR_LOG.ec" 2>/dev/null || echo 0)
+    w_e=$(count_warnings_errors_text "$GR_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+    if [[ "$gr_ec" -ne 0 || "$e" -gt 0 ]]; then print_finding "critical" "$e" "Gradle compile errors detected"; else print_finding "good" "Gradle compile OK"; fi
+    if [[ "$w" -gt 0 ]]; then print_finding "warning" "$w" "Gradle compile warnings"; fi
+
+    # Try optional lint tasks if they exist
+    if grep -q "checkstyleMain" "$GR_TASKS"; then
+      CS_LOG="$(mktemp)"; run_cmd_log "$CS_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q checkstyleMain -x test"
+      w_e=$(count_warnings_errors_text "$CS_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+      if [[ "$e" -gt 0 ]]; then print_finding "warning" "$e" "Checkstyle issues (Gradle)"; fi
+    fi
+    if grep -q "pmdMain" "$GR_TASKS"; then
+      PMD_LOG="$(mktemp)"; run_cmd_log "$PMD_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q pmdMain -x test"
+      w_e=$(count_warnings_errors_text "$PMD_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+      if [[ "$e" -gt 0 || "$w" -gt 0 ]]; then print_finding "warning" "$((w+e))" "PMD issues (Gradle)"; fi
+    fi
+    if grep -q "spotbugsMain" "$GR_TASKS"; then
+      SB_LOG="$(mktemp)"; run_cmd_log "$SB_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q spotbugsMain -x test"
+      if grep -qi "bug" "$SB_LOG"; then
+        sb_cnt=$(grep -i "bug" "$SB_LOG" | wc -l | awk '{print $1+0}')
+        print_finding "warning" "$sb_cnt" "SpotBugs reported potential issues"
+      fi
+    fi
+  fi
+else
+  print_finding "info" 1 "Build checks disabled (--no-build)"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 36: META STATISTICS & INVENTORY
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 36; then
+print_header "36. META STATISTICS & INVENTORY"
+print_category "Detects: project type (Maven/Gradle), Java version" \
+  "High-level overview of the project"
+
+proj_type="Unknown"
+if [[ -f "$PROJECT_DIR/pom.xml" ]]; then proj_type="Maven"; fi
+if [[ -f "$PROJECT_DIR/build.gradle" || -f "$PROJECT_DIR/build.gradle.kts" ]]; then proj_type="Gradle"; fi
+say "  ${BLUE}${INFO} Info${RESET} ${WHITE}(project:${RESET} ${CYAN}${proj_type}${RESET}${WHITE}, java:${RESET} ${CYAN}${JAVA_VERSION_STR:-unknown}${RESET}${WHITE})${RESET}"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 37: MISC API MISUSE
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 37; then
+print_header "37. MISC API MISUSE"
+print_category "Detects: System.runFinalizersOnExit, Thread.stop, setAccessible(true)" \
+  "Legacy and unsafe APIs"
+
+print_subheader "Legacy/unsafe API calls"
+finalizers=$("${GREP_RN[@]}" -e "System\.runFinalizersOnExit\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+thread_stop=$("${GREP_RN[@]}" -e "Thread\.stop\(|Thread\.suspend\(|Thread\.resume\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+set_access=$("${GREP_RN[@]}" -e "\.setAccessible\(\s*true\s*\)" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$finalizers" -gt 0 ]; then print_finding "critical" "$finalizers" "System.runFinalizersOnExit used - do not use"; fi
+if [ "$thread_stop" -gt 0 ]; then print_finding "critical" "$thread_stop" "Thread.stop/suspend/resume used - unsafe"; fi
+if [ "$set_access" -gt 0 ]; then print_finding "info" "$set_access" "setAccessible(true) used - restrict usage"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 38: REGEX & STRING PITFALLS
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 38; then
+print_header "38. REGEX & STRING PITFALLS"
+print_category "Detects: ReDoS patterns, Pattern.compile with variables, toLowerCase/equals" \
+  "String/regex bugs cause performance issues and subtle mismatches"
+
+print_subheader "Nested quantifiers (ReDoS risk)"
+redos_cnt=$("${GREP_RN[@]}" -e "\([^)]*\+[^)]*\)\+|\([^)]*\*[^)]*\)\+" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$redos_cnt" -gt 0 ]; then print_finding "warning" "$redos_cnt" "Regex contains nested quantifiers - potential ReDoS"; show_detailed_finding "\([^)]*\+[^)]*\)\+|\([^)]*\*[^)]*\)\+" 3; fi
+
+print_subheader "Pattern.compile with variables (injection risk)"
+dyn_pat=$("${GREP_RN[@]}" -e "Pattern\.compile\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\)" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$dyn_pat" -gt 0 ]; then print_finding "info" "$dyn_pat" "Dynamic Pattern.compile detected - sanitize/escape user input"; fi
+
+print_subheader "Case handling via toLowerCase()/toUpperCase() then equals"
+case_cmp=$("${GREP_RN[@]}" -e "\.to(Lower|Upper)Case\(\)\.equals\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$case_cmp" -gt 0 ]; then print_finding "info" "$case_cmp" "Prefer equalsIgnoreCase or use Locale"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 39: COLLECTIONS & GENERICS
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 39; then
+print_header "39. COLLECTIONS & GENERICS"
+print_category "Detects: raw types, legacy Vector/Hashtable, remove in foreach" \
+  "Raw types and mutation during iteration cause runtime errors"
+
+print_subheader "Raw generic types (List/Map/Set without <...>)"
+raw_types=$("${GREP_RN[@]}" -e "\b(List|Map|Set)\s+[a-zA-Z_][a-zA-Z0-9_]*\s*(=|;)" "$PROJECT_DIR" 2>/dev/null | (grep -v '<' || true) | count_lines)
+if [ "$raw_types" -gt 0 ]; then print_finding "warning" "$raw_types" "Raw generic types used"; fi
+
+print_subheader "Legacy synchronized collections"
+legacy=$(( $(ast_search 'new java.util.Vector($$)' || echo 0) + $(ast_search 'new java.util.Hashtable($$)' || echo 0) + $("${GREP_RN[@]}" -e "new[[:space:]]+(Vector|Hashtable)\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true) ))
+if [ "$legacy" -gt 0 ]; then print_finding "info" "$legacy" "Vector/Hashtable detected"; fi
+
+print_subheader "Collection modification during foreach (heuristic)"
+mod_foreach=$("${GREP_RN[@]}" -e "for\s*\([^)]+:[^)]+\)\s*\{" "$PROJECT_DIR" 2>/dev/null | (grep -A3 -F ".remove(" || true) | (grep -c -F ".remove(" || true))
+mod_foreach=$(echo "$mod_foreach" | awk 'END{print $0+0}')
+if [ "$mod_foreach" -gt 0 ]; then print_finding "warning" "$mod_foreach" "Possible modification of collection during iteration"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 40: SWITCH & CONTROL FLOW
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 40; then
+print_header "40. SWITCH & CONTROL FLOW"
+print_category "Detects: fall-through (classic switch), switch without default" \
+  "Control flow bugs cause unexpected behavior"
+
+print_subheader "Classic switch fall-through (ignore '->' labels)"
+switch_count=$("${GREP_RN[@]}" -e "switch\s*\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+case_count=$("${GREP_RN[@]}" -e "case[[:space:]]+.*:" "$PROJECT_DIR" 2>/dev/null | (grep -v -- "->" || true) | count_lines || true)
+break_count=$("${GREP_RN[@]}" -e "\bbreak\s*;" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$case_count" -gt "$break_count" ] && [ "$case_count" -gt 0 ]; then
+  diff=$((case_count - break_count))
+  print_finding "warning" "$diff" "Switch cases may be missing break (classic switch)"
+fi
+
+print_subheader "Switch without default (classic switch)"
+default_count=$("${GREP_RN[@]}" -e "default[[:space:]]*:" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$switch_count" -gt "$default_count" ] && [ "$switch_count" -gt 0 ]; then
+  diff=$((switch_count - default_count))
+  print_finding "info" "$diff" "Some switch statements have no default case (classic syntax)"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 41: SERIALIZATION & COMPATIBILITY
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 41; then
+print_header "41. SERIALIZATION & COMPATIBILITY"
+print_category "Detects: implements Serializable, readObject/writeObject" \
+  "Serialization hazards and maintenance burdens"
+
+print_subheader "Serializable implementations (inventory)"
+serializable=$("${GREP_RN[@]}" -e "implements\s+Serializable\b" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$serializable" -gt 0 ]; then print_finding "info" "$serializable" "Classes implement Serializable - audit necessity"; fi
+
+print_subheader "Custom readObject/writeObject methods"
+custom_ser=$("${GREP_RN[@]}" -e "void\s+readObject\s*\(|void\s+writeObject\s*\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$custom_ser" -gt 0 ]; then print_finding "info" "$custom_ser" "Custom serialization hooks present - validate invariants"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 42: JAVA 21 FEATURES (INFO)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 42; then
+print_header "42. JAVA 21 FEATURES (INFO)"
+print_category "Detects: Virtual Threads, Structured Concurrency, Sequenced Collections" \
+  "Inventory of modern APIs to guide reviews for correct usage"
+
+print_subheader "Virtual Threads"
+virt_threads=$(( $(ast_search 'java.lang.Thread.ofVirtual().start($$)' || echo 0) + $("${GREP_RN[@]}" -e "Thread\.ofVirtual\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true) ))
+if [ "$virt_threads" -gt 0 ]; then print_finding "info" "$virt_threads" "Virtual threads in use - ensure blocking operations are appropriate"; fi
+
+print_subheader "StructuredTaskScope"
+scope_cnt=$("${GREP_RN[@]}" -e "StructuredTaskScope" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$scope_cnt" -gt 0 ]; then print_finding "info" "$scope_cnt" "StructuredTaskScope in use - validate proper join/shutdown handling"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 43: SQL CONSTRUCTION (HEURISTICS)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 43; then
+print_header "43. SQL CONSTRUCTION (HEURISTICS)"
+print_category "Detects: string-concatenated SQL, Statement.executeQuery with + operator" \
+  "Prefer prepared statements with parameters to avoid injection"
+
+print_subheader "String-concatenated SQL"
+sql_concat=$("${GREP_RN[@]}" -e "\"(SELECT|INSERT|UPDATE|DELETE)[^\"]*\"[[:space:]]*\\+[[:space:]]*[A-Za-z0-9_]" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$sql_concat" -gt 0 ]; then
+  print_finding "warning" "$sql_concat" "SQL built via concatenation - prefer parameters"
+  show_detailed_finding "execute(Query|Update)\s*\([^)]*\+" 3
+fi
+
+print_subheader "Statement.executeQuery with concatenation"
+exec_concat=$("${GREP_RN[@]}" -e "execute(Query|Update)\s*\(" "$PROJECT_DIR" 2>/dev/null | (grep "\+" || true) | count_lines)
+if [ "$exec_concat" -gt 0 ]; then
+  print_finding "warning" "$exec_concat" "execute* called with concatenated query string"
+  show_detailed_finding "execute(Query|Update)\s*\([^)]*\+" 3
+elif [ "$sql_concat" -eq 0 ]; then
+  mapfile -t sql_meta < <(java_pattern_scan sql_concat)
+  sql_fallback="${sql_meta[0]:-0}"
+  sql_samples="${sql_meta[1]:-}"
+  if [ "${sql_fallback:-0}" -gt 0 ]; then
+    sql_desc="Prefer PreparedStatement parameters over string concatenation"
+    if [ -n "$sql_samples" ]; then
+      sql_desc+=" (e.g., ${sql_samples%%,*})"
+    fi
+    print_finding "warning" "$sql_fallback" "SQL built via concatenation - prefer parameters" "$sql_desc"
+  fi
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 44: ANNOTATIONS & NULLNESS (HEURISTICS)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 44; then
+print_header "44. ANNOTATIONS & NULLNESS (HEURISTICS)"
+print_category "Detects: @Nullable without guard (approx), @Deprecated usages" \
+  "Annotation-driven contracts must be respected"
+
+print_subheader "@Nullable parameters used without null guard (approx)"
+nullable_params=$("${GREP_RN[@]}" -e "@Nullable" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$nullable_params" -gt 0 ]; then print_finding "info" "$nullable_params" "@Nullable present - ensure null checks at use sites"; fi
+
+print_subheader "Usage of @Deprecated APIs"
+deprecated_use=$("${GREP_RN[@]}" -e "@Deprecated|@deprecated" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$deprecated_use" -gt 0 ]; then print_finding "info" "$deprecated_use" "Deprecated annotations present - verify migration plans"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 45: AST-GREP RULE PACK FINDINGS (JSON/SARIF passthrough)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 45; then
+print_header "45. AST-GREP RULE PACK FINDINGS"
+if [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_RULE_DIR" ]]; then
+  run_ast_rules || true
+  say "${DIM}${INFO} Above JSON/SARIF lines are ast-grep matches (id, message, severity, file/pos).${RESET}"
+  if [[ "$FORMAT" == "sarif" ]]; then
+    say "${DIM}${INFO} Tip: ${BOLD}${AST_GREP_CMD[*]} scan -r $AST_RULE_DIR \"$PROJECT_DIR\" --sarif > report.sarif${RESET}"
+  fi
+else
+  say "${YELLOW}${WARN} ast-grep scan subcommand unavailable; rule-pack mode skipped.${RESET}"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 46: BUILD HEALTH (Maven/Gradle best-effort)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 46; then
+print_header "46. BUILD HEALTH (Maven/Gradle)"
+print_category "Runs: compile/test-compile tasks; optional lint tasks if configured" \
+  "Ensures the project compiles; inventories warnings/errors"
+
+if [[ "$RUN_BUILD" -eq 1 ]]; then
+  # Maven compile
+  if [[ "$HAS_MAVEN" -eq 1 && -f "$PROJECT_DIR/pom.xml" ]]; then
+    MVN_BIN="${MVNW:-mvn}"
+    MVN_LOG="$(mktemp)"
+    run_cmd_log "$MVN_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$MVN_BIN\" -q -e -T1C -DskipTests=true -DskipITs=true -Dmaven.test.skip.exec=true -Dspotbugs.skip=true -Dpmd.skip=true -Dcheckstyle.skip=true -Denforcer.skip=true -Dgpg.skip=true -Dlicense.skip=true -Drat.skip=true -Djacoco.skip=true -Danimal.sniffer.skip=true -Dskip.npm -Dskip.yarn -Dskip.node -DskipFrontend -Dfrontend.skip=true -U -B compile"
+    mvn_ec=$(cat "$MVN_LOG.ec" 2>/dev/null || echo 0)
+    w_e=$(count_warnings_errors_text "$MVN_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+    if [[ "$mvn_ec" -ne 0 || "$e" -gt 0 ]]; then print_finding "critical" "$e" "Maven compile errors detected"; else print_finding "good" "Maven compile OK"; fi
+    if [[ "$w" -gt 0 ]]; then print_finding "warning" "$w" "Maven compile warnings"; fi
+  fi
+
+  # Gradle compile
+  if [[ "$HAS_GRADLE" -eq 1 && ( -f "$PROJECT_DIR/build.gradle" || -f "$PROJECT_DIR/build.gradle.kts" ) ]]; then
+    GR_BIN="${GRADLEW:-gradle}"
+    GR_TASKS="$(mktemp)"
+    run_cmd_log "$GR_TASKS" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q tasks --all"
+    GR_LOG="$(mktemp)"
+    run_cmd_log "$GR_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q classes testClasses -x test"
+    gr_ec=$(cat "$GR_LOG.ec" 2>/dev/null || echo 0)
+    w_e=$(count_warnings_errors_text "$GR_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+    if [[ "$gr_ec" -ne 0 || "$e" -gt 0 ]]; then print_finding "critical" "$e" "Gradle compile errors detected"; else print_finding "good" "Gradle compile OK"; fi
+    if [[ "$w" -gt 0 ]]; then print_finding "warning" "$w" "Gradle compile warnings"; fi
+
+    # Try optional lint tasks if they exist
+    if grep -q "checkstyleMain" "$GR_TASKS"; then
+      CS_LOG="$(mktemp)"; run_cmd_log "$CS_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q checkstyleMain -x test"
+      w_e=$(count_warnings_errors_text "$CS_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+      if [[ "$e" -gt 0 ]]; then print_finding "warning" "$e" "Checkstyle issues (Gradle)"; fi
+    fi
+    if grep -q "pmdMain" "$GR_TASKS"; then
+      PMD_LOG="$(mktemp)"; run_cmd_log "$PMD_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q pmdMain -x test"
+      w_e=$(count_warnings_errors_text "$PMD_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+      if [[ "$e" -gt 0 || "$w" -gt 0 ]]; then print_finding "warning" "$((w+e))" "PMD issues (Gradle)"; fi
+    fi
+    if grep -q "spotbugsMain" "$GR_TASKS"; then
+      SB_LOG="$(mktemp)"; run_cmd_log "$SB_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q spotbugsMain -x test"
+      if grep -qi "bug" "$SB_LOG"; then
+        sb_cnt=$(grep -i "bug" "$SB_LOG" | wc -l | awk '{print $1+0}')
+        print_finding "warning" "$sb_cnt" "SpotBugs reported potential issues"
+      fi
+    fi
+  fi
+else
+  print_finding "info" 1 "Build checks disabled (--no-build)"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 47: META STATISTICS & INVENTORY
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 47; then
+print_header "47. META STATISTICS & INVENTORY"
+print_category "Detects: project type (Maven/Gradle), Java version" \
+  "High-level overview of the project"
+
+proj_type="Unknown"
+if [[ -f "$PROJECT_DIR/pom.xml" ]]; then proj_type="Maven"; fi
+if [[ -f "$PROJECT_DIR/build.gradle" || -f "$PROJECT_DIR/build.gradle.kts" ]]; then proj_type="Gradle"; fi
+say "  ${BLUE}${INFO} Info${RESET} ${WHITE}(project:${RESET} ${CYAN}${proj_type}${RESET}${WHITE}, java:${RESET} ${CYAN}${JAVA_VERSION_STR:-unknown}${RESET}${WHITE})${RESET}"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 48: MISC API MISUSE
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 48; then
+print_header "48. MISC API MISUSE"
+print_category "Detects: System.runFinalizersOnExit, Thread.stop, setAccessible(true)" \
+  "Legacy and unsafe APIs"
+
+print_subheader "Legacy/unsafe API calls"
+finalizers=$("${GREP_RN[@]}" -e "System\.runFinalizersOnExit\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+thread_stop=$("${GREP_RN[@]}" -e "Thread\.stop\(|Thread\.suspend\(|Thread\.resume\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+set_access=$("${GREP_RN[@]}" -e "\.setAccessible\(\s*true\s*\)" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$finalizers" -gt 0 ]; then print_finding "critical" "$finalizers" "System.runFinalizersOnExit used - do not use"; fi
+if [ "$thread_stop" -gt 0 ]; then print_finding "critical" "$thread_stop" "Thread.stop/suspend/resume used - unsafe"; fi
+if [ "$set_access" -gt 0 ]; then print_finding "info" "$set_access" "setAccessible(true) used - restrict usage"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 49: REGEX & STRING PITFALLS
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 49; then
+print_header "49. REGEX & STRING PITFALLS"
+print_category "Detects: ReDoS patterns, Pattern.compile with variables, toLowerCase/equals" \
+  "String/regex bugs cause performance issues and subtle mismatches"
+
+print_subheader "Nested quantifiers (ReDoS risk)"
+redos_cnt=$("${GREP_RN[@]}" -e "\([^)]*\+[^)]*\)\+|\([^)]*\*[^)]*\)\+" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$redos_cnt" -gt 0 ]; then print_finding "warning" "$redos_cnt" "Regex contains nested quantifiers - potential ReDoS"; show_detailed_finding "\([^)]*\+[^)]*\)\+|\([^)]*\*[^)]*\)\+" 3; fi
+
+print_subheader "Pattern.compile with variables (injection risk)"
+dyn_pat=$("${GREP_RN[@]}" -e "Pattern\.compile\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\)" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$dyn_pat" -gt 0 ]; then print_finding "info" "$dyn_pat" "Dynamic Pattern.compile detected - sanitize/escape user input"; fi
+
+print_subheader "Case handling via toLowerCase()/toUpperCase() then equals"
+case_cmp=$("${GREP_RN[@]}" -e "\.to(Lower|Upper)Case\(\)\.equals\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$case_cmp" -gt 0 ]; then print_finding "info" "$case_cmp" "Prefer equalsIgnoreCase or use Locale"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 50: COLLECTIONS & GENERICS
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 50; then
+print_header "50. COLLECTIONS & GENERICS"
+print_category "Detects: raw types, legacy Vector/Hashtable, remove in foreach" \
+  "Raw types and mutation during iteration cause runtime errors"
+
+print_subheader "Raw generic types (List/Map/Set without <...>)"
+raw_types=$("${GREP_RN[@]}" -e "\b(List|Map|Set)\s+[a-zA-Z_][a-zA-Z0-9_]*\s*(=|;)" "$PROJECT_DIR" 2>/dev/null | (grep -v '<' || true) | count_lines)
+if [ "$raw_types" -gt 0 ]; then print_finding "warning" "$raw_types" "Raw generic types used"; fi
+
+print_subheader "Legacy synchronized collections"
+legacy=$(( $(ast_search 'new java.util.Vector($$)' || echo 0) + $(ast_search 'new java.util.Hashtable($$)' || echo 0) + $("${GREP_RN[@]}" -e "new[[:space:]]+(Vector|Hashtable)\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true) ))
+if [ "$legacy" -gt 0 ]; then print_finding "info" "$legacy" "Vector/Hashtable detected"; fi
+
+print_subheader "Collection modification during foreach (heuristic)"
+mod_foreach=$("${GREP_RN[@]}" -e "for\s*\([^)]+:[^)]+\)\s*\{" "$PROJECT_DIR" 2>/dev/null | (grep -A3 -F ".remove(" || true) | (grep -c -F ".remove(" || true))
+mod_foreach=$(echo "$mod_foreach" | awk 'END{print $0+0}')
+if [ "$mod_foreach" -gt 0 ]; then print_finding "warning" "$mod_foreach" "Possible modification of collection during iteration"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 51: SWITCH & CONTROL FLOW
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 51; then
+print_header "51. SWITCH & CONTROL FLOW"
+print_category "Detects: fall-through (classic switch), switch without default" \
+  "Control flow bugs cause unexpected behavior"
+
+print_subheader "Classic switch fall-through (ignore '->' labels)"
+switch_count=$("${GREP_RN[@]}" -e "switch\s*\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+case_count=$("${GREP_RN[@]}" -e "case[[:space:]]+.*:" "$PROJECT_DIR" 2>/dev/null | (grep -v -- "->" || true) | count_lines || true)
+break_count=$("${GREP_RN[@]}" -e "\bbreak\s*;" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$case_count" -gt "$break_count" ] && [ "$case_count" -gt 0 ]; then
+  diff=$((case_count - break_count))
+  print_finding "warning" "$diff" "Switch cases may be missing break (classic switch)"
+fi
+
+print_subheader "Switch without default (classic switch)"
+default_count=$("${GREP_RN[@]}" -e "default[[:space:]]*:" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$switch_count" -gt "$default_count" ] && [ "$switch_count" -gt 0 ]; then
+  diff=$((switch_count - default_count))
+  print_finding "info" "$diff" "Some switch statements have no default case (classic syntax)"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 52: SERIALIZATION & COMPATIBILITY
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 52; then
+print_header "52. SERIALIZATION & COMPATIBILITY"
+print_category "Detects: implements Serializable, readObject/writeObject" \
+  "Serialization hazards and maintenance burdens"
+
+print_subheader "Serializable implementations (inventory)"
+serializable=$("${GREP_RN[@]}" -e "implements\s+Serializable\b" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$serializable" -gt 0 ]; then print_finding "info" "$serializable" "Classes implement Serializable - audit necessity"; fi
+
+print_subheader "Custom readObject/writeObject methods"
+custom_ser=$("${GREP_RN[@]}" -e "void\s+readObject\s*\(|void\s+writeObject\s*\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$custom_ser" -gt 0 ]; then print_finding "info" "$custom_ser" "Custom serialization hooks present - validate invariants"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 53: JAVA 21 FEATURES (INFO)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 53; then
+print_header "53. JAVA 21 FEATURES (INFO)"
+print_category "Detects: Virtual Threads, Structured Concurrency, Sequenced Collections" \
+  "Inventory of modern APIs to guide reviews for correct usage"
+
+print_subheader "Virtual Threads"
+virt_threads=$(( $(ast_search 'java.lang.Thread.ofVirtual().start($$)' || echo 0) + $("${GREP_RN[@]}" -e "Thread\.ofVirtual\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true) ))
+if [ "$virt_threads" -gt 0 ]; then print_finding "info" "$virt_threads" "Virtual threads in use - ensure blocking operations are appropriate"; fi
+
+print_subheader "StructuredTaskScope"
+scope_cnt=$("${GREP_RN[@]}" -e "StructuredTaskScope" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$scope_cnt" -gt 0 ]; then print_finding "info" "$scope_cnt" "StructuredTaskScope in use - validate proper join/shutdown handling"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 54: SQL CONSTRUCTION (HEURISTICS)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 54; then
+print_header "54. SQL CONSTRUCTION (HEURISTICS)"
+print_category "Detects: string-concatenated SQL, Statement.executeQuery with + operator" \
+  "Prefer prepared statements with parameters to avoid injection"
+
+print_subheader "String-concatenated SQL"
+sql_concat=$("${GREP_RN[@]}" -e "\"(SELECT|INSERT|UPDATE|DELETE)[^\"]*\"[[:space:]]*\\+[[:space:]]*[A-Za-z0-9_]" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$sql_concat" -gt 0 ]; then
+  print_finding "warning" "$sql_concat" "SQL built via concatenation - prefer parameters"
+  show_detailed_finding "execute(Query|Update)\s*\([^)]*\+" 3
+fi
+
+print_subheader "Statement.executeQuery with concatenation"
+exec_concat=$("${GREP_RN[@]}" -e "execute(Query|Update)\s*\(" "$PROJECT_DIR" 2>/dev/null | (grep "\+" || true) | count_lines)
+if [ "$exec_concat" -gt 0 ]; then
+  print_finding "warning" "$exec_concat" "execute* called with concatenated query string"
+  show_detailed_finding "execute(Query|Update)\s*\([^)]*\+" 3
+elif [ "$sql_concat" -eq 0 ]; then
+  mapfile -t sql_meta < <(java_pattern_scan sql_concat)
+  sql_fallback="${sql_meta[0]:-0}"
+  sql_samples="${sql_meta[1]:-}"
+  if [ "${sql_fallback:-0}" -gt 0 ]; then
+    sql_desc="Prefer PreparedStatement parameters over string concatenation"
+    if [ -n "$sql_samples" ]; then
+      sql_desc+=" (e.g., ${sql_samples%%,*})"
+    fi
+    print_finding "warning" "$sql_fallback" "SQL built via concatenation - prefer parameters" "$sql_desc"
+  fi
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 55: ANNOTATIONS & NULLNESS (HEURISTICS)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 55; then
+print_header "55. ANNOTATIONS & NULLNESS (HEURISTICS)"
+print_category "Detects: @Nullable without guard (approx), @Deprecated usages" \
+  "Annotation-driven contracts must be respected"
+
+print_subheader "@Nullable parameters used without null guard (approx)"
+nullable_params=$("${GREP_RN[@]}" -e "@Nullable" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$nullable_params" -gt 0 ]; then print_finding "info" "$nullable_params" "@Nullable present - ensure null checks at use sites"; fi
+
+print_subheader "Usage of @Deprecated APIs"
+deprecated_use=$("${GREP_RN[@]}" -e "@Deprecated|@deprecated" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$deprecated_use" -gt 0 ]; then print_finding "info" "$deprecated_use" "Deprecated annotations present - verify migration plans"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 56: AST-GREP RULE PACK FINDINGS (JSON/SARIF passthrough)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 56; then
+print_header "56. AST-GREP RULE PACK FINDINGS"
+if [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_RULE_DIR" ]]; then
+  run_ast_rules || true
+  say "${DIM}${INFO} Above JSON/SARIF lines are ast-grep matches (id, message, severity, file/pos).${RESET}"
+  if [[ "$FORMAT" == "sarif" ]]; then
+    say "${DIM}${INFO} Tip: ${BOLD}${AST_GREP_CMD[*]} scan -r $AST_RULE_DIR \"$PROJECT_DIR\" --sarif > report.sarif${RESET}"
+  fi
+else
+  say "${YELLOW}${WARN} ast-grep scan subcommand unavailable; rule-pack mode skipped.${RESET}"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 57: BUILD HEALTH (Maven/Gradle best-effort)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 57; then
+print_header "57. BUILD HEALTH (Maven/Gradle)"
+print_category "Runs: compile/test-compile tasks; optional lint tasks if configured" \
+  "Ensures the project compiles; inventories warnings/errors"
+
+if [[ "$RUN_BUILD" -eq 1 ]]; then
+  # Maven compile
+  if [[ "$HAS_MAVEN" -eq 1 && -f "$PROJECT_DIR/pom.xml" ]]; then
+    MVN_BIN="${MVNW:-mvn}"
+    MVN_LOG="$(mktemp)"
+    run_cmd_log "$MVN_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$MVN_BIN\" -q -e -T1C -DskipTests=true -DskipITs=true -Dmaven.test.skip.exec=true -Dspotbugs.skip=true -Dpmd.skip=true -Dcheckstyle.skip=true -Denforcer.skip=true -Dgpg.skip=true -Dlicense.skip=true -Drat.skip=true -Djacoco.skip=true -Danimal.sniffer.skip=true -Dskip.npm -Dskip.yarn -Dskip.node -DskipFrontend -Dfrontend.skip=true -U -B compile"
+    mvn_ec=$(cat "$MVN_LOG.ec" 2>/dev/null || echo 0)
+    w_e=$(count_warnings_errors_text "$MVN_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+    if [[ "$mvn_ec" -ne 0 || "$e" -gt 0 ]]; then print_finding "critical" "$e" "Maven compile errors detected"; else print_finding "good" "Maven compile OK"; fi
+    if [[ "$w" -gt 0 ]]; then print_finding "warning" "$w" "Maven compile warnings"; fi
+  fi
+
+  # Gradle compile
+  if [[ "$HAS_GRADLE" -eq 1 && ( -f "$PROJECT_DIR/build.gradle" || -f "$PROJECT_DIR/build.gradle.kts" ) ]]; then
+    GR_BIN="${GRADLEW:-gradle}"
+    GR_TASKS="$(mktemp)"
+    run_cmd_log "$GR_TASKS" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q tasks --all"
+    GR_LOG="$(mktemp)"
+    run_cmd_log "$GR_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q classes testClasses -x test"
+    gr_ec=$(cat "$GR_LOG.ec" 2>/dev/null || echo 0)
+    w_e=$(count_warnings_errors_text "$GR_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+    if [[ "$gr_ec" -ne 0 || "$e" -gt 0 ]]; then print_finding "critical" "$e" "Gradle compile errors detected"; else print_finding "good" "Gradle compile OK"; fi
+    if [[ "$w" -gt 0 ]]; then print_finding "warning" "$w" "Gradle compile warnings"; fi
+
+    # Try optional lint tasks if they exist
+    if grep -q "checkstyleMain" "$GR_TASKS"; then
+      CS_LOG="$(mktemp)"; run_cmd_log "$CS_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q checkstyleMain -x test"
+      w_e=$(count_warnings_errors_text "$CS_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+      if [[ "$e" -gt 0 ]]; then print_finding "warning" "$e" "Checkstyle issues (Gradle)"; fi
+    fi
+    if grep -q "pmdMain" "$GR_TASKS"; then
+      PMD_LOG="$(mktemp)"; run_cmd_log "$PMD_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q pmdMain -x test"
+      w_e=$(count_warnings_errors_text "$PMD_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+      if [[ "$e" -gt 0 || "$w" -gt 0 ]]; then print_finding "warning" "$((w+e))" "PMD issues (Gradle)"; fi
+    fi
+    if grep -q "spotbugsMain" "$GR_TASKS"; then
+      SB_LOG="$(mktemp)"; run_cmd_log "$SB_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q spotbugsMain -x test"
+      if grep -qi "bug" "$SB_LOG"; then
+        sb_cnt=$(grep -i "bug" "$SB_LOG" | wc -l | awk '{print $1+0}')
+        print_finding "warning" "$sb_cnt" "SpotBugs reported potential issues"
+      fi
+    fi
+  fi
+else
+  print_finding "info" 1 "Build checks disabled (--no-build)"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 58: META STATISTICS & INVENTORY
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 58; then
+print_header "58. META STATISTICS & INVENTORY"
+print_category "Detects: project type (Maven/Gradle), Java version" \
+  "High-level overview of the project"
+
+proj_type="Unknown"
+if [[ -f "$PROJECT_DIR/pom.xml" ]]; then proj_type="Maven"; fi
+if [[ -f "$PROJECT_DIR/build.gradle" || -f "$PROJECT_DIR/build.gradle.kts" ]]; then proj_type="Gradle"; fi
+say "  ${BLUE}${INFO} Info${RESET} ${WHITE}(project:${RESET} ${CYAN}${proj_type}${RESET}${WHITE}, java:${RESET} ${CYAN}${JAVA_VERSION_STR:-unknown}${RESET}${WHITE})${RESET}"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 59: MISC API MISUSE
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 59; then
+print_header "59. MISC API MISUSE"
+print_category "Detects: System.runFinalizersOnExit, Thread.stop, setAccessible(true)" \
+  "Legacy and unsafe APIs"
+
+print_subheader "Legacy/unsafe API calls"
+finalizers=$("${GREP_RN[@]}" -e "System\.runFinalizersOnExit\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+thread_stop=$("${GREP_RN[@]}" -e "Thread\.stop\(|Thread\.suspend\(|Thread\.resume\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+set_access=$("${GREP_RN[@]}" -e "\.setAccessible\(\s*true\s*\)" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$finalizers" -gt 0 ]; then print_finding "critical" "$finalizers" "System.runFinalizersOnExit used - do not use"; fi
+if [ "$thread_stop" -gt 0 ]; then print_finding "critical" "$thread_stop" "Thread.stop/suspend/resume used - unsafe"; fi
+if [ "$set_access" -gt 0 ]; then print_finding "info" "$set_access" "setAccessible(true) used - restrict usage"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 60: REGEX & STRING PITFALLS
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 60; then
+print_header "60. REGEX & STRING PITFALLS"
+print_category "Detects: ReDoS patterns, Pattern.compile with variables, toLowerCase/equals" \
+  "String/regex bugs cause performance issues and subtle mismatches"
+
+print_subheader "Nested quantifiers (ReDoS risk)"
+redos_cnt=$("${GREP_RN[@]}" -e "\([^)]*\+[^)]*\)\+|\([^)]*\*[^)]*\)\+" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$redos_cnt" -gt 0 ]; then print_finding "warning" "$redos_cnt" "Regex contains nested quantifiers - potential ReDoS"; show_detailed_finding "\([^)]*\+[^)]*\)\+|\([^)]*\*[^)]*\)\+" 3; fi
+
+print_subheader "Pattern.compile with variables (injection risk)"
+dyn_pat=$("${GREP_RN[@]}" -e "Pattern\.compile\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\)" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$dyn_pat" -gt 0 ]; then print_finding "info" "$dyn_pat" "Dynamic Pattern.compile detected - sanitize/escape user input"; fi
+
+print_subheader "Case handling via toLowerCase()/toUpperCase() then equals"
+case_cmp=$("${GREP_RN[@]}" -e "\.to(Lower|Upper)Case\(\)\.equals\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$case_cmp" -gt 0 ]; then print_finding "info" "$case_cmp" "Prefer equalsIgnoreCase or use Locale"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 61: COLLECTIONS & GENERICS
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 61; then
+print_header "61. COLLECTIONS & GENERICS"
+print_category "Detects: raw types, legacy Vector/Hashtable, remove in foreach" \
+  "Raw types and mutation during iteration cause runtime errors"
+
+print_subheader "Raw generic types (List/Map/Set without <...>)"
+raw_types=$("${GREP_RN[@]}" -e "\b(List|Map|Set)\s+[a-zA-Z_][a-zA-Z0-9_]*\s*(=|;)" "$PROJECT_DIR" 2>/dev/null | (grep -v '<' || true) | count_lines)
+if [ "$raw_types" -gt 0 ]; then print_finding "warning" "$raw_types" "Raw generic types used"; fi
+
+print_subheader "Legacy synchronized collections"
+legacy=$(( $(ast_search 'new java.util.Vector($$)' || echo 0) + $(ast_search 'new java.util.Hashtable($$)' || echo 0) + $("${GREP_RN[@]}" -e "new[[:space:]]+(Vector|Hashtable)\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true) ))
+if [ "$legacy" -gt 0 ]; then print_finding "info" "$legacy" "Vector/Hashtable detected"; fi
+
+print_subheader "Collection modification during foreach (heuristic)"
+mod_foreach=$("${GREP_RN[@]}" -e "for\s*\([^)]+:[^)]+\)\s*\{" "$PROJECT_DIR" 2>/dev/null | (grep -A3 -F ".remove(" || true) | (grep -c -F ".remove(" || true))
+mod_foreach=$(echo "$mod_foreach" | awk 'END{print $0+0}')
+if [ "$mod_foreach" -gt 0 ]; then print_finding "warning" "$mod_foreach" "Possible modification of collection during iteration"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 62: SWITCH & CONTROL FLOW
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 62; then
+print_header "62. SWITCH & CONTROL FLOW"
+print_category "Detects: fall-through (classic switch), switch without default" \
+  "Control flow bugs cause unexpected behavior"
+
+print_subheader "Classic switch fall-through (ignore '->' labels)"
+switch_count=$("${GREP_RN[@]}" -e "switch\s*\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+case_count=$("${GREP_RN[@]}" -e "case[[:space:]]+.*:" "$PROJECT_DIR" 2>/dev/null | (grep -v -- "->" || true) | count_lines || true)
+break_count=$("${GREP_RN[@]}" -e "\bbreak\s*;" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$case_count" -gt "$break_count" ] && [ "$case_count" -gt 0 ]; then
+  diff=$((case_count - break_count))
+  print_finding "warning" "$diff" "Switch cases may be missing break (classic switch)"
+fi
+
+print_subheader "Switch without default (classic switch)"
+default_count=$("${GREP_RN[@]}" -e "default[[:space:]]*:" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$switch_count" -gt "$default_count" ] && [ "$switch_count" -gt 0 ]; then
+  diff=$((switch_count - default_count))
+  print_finding "info" "$diff" "Some switch statements have no default case (classic syntax)"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 63: SERIALIZATION & COMPATIBILITY
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 63; then
+print_header "63. SERIALIZATION & COMPATIBILITY"
+print_category "Detects: implements Serializable, readObject/writeObject" \
+  "Serialization hazards and maintenance burdens"
+
+print_subheader "Serializable implementations (inventory)"
+serializable=$("${GREP_RN[@]}" -e "implements\s+Serializable\b" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$serializable" -gt 0 ]; then print_finding "info" "$serializable" "Classes implement Serializable - audit necessity"; fi
+
+print_subheader "Custom readObject/writeObject methods"
+custom_ser=$("${GREP_RN[@]}" -e "void\s+readObject\s*\(|void\s+writeObject\s*\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$custom_ser" -gt 0 ]; then print_finding "info" "$custom_ser" "Custom serialization hooks present - validate invariants"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 64: JAVA 21 FEATURES (INFO)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 64; then
+print_header "64. JAVA 21 FEATURES (INFO)"
+print_category "Detects: Virtual Threads, Structured Concurrency, Sequenced Collections" \
+  "Inventory of modern APIs to guide reviews for correct usage"
+
+print_subheader "Virtual Threads"
+virt_threads=$(( $(ast_search 'java.lang.Thread.ofVirtual().start($$)' || echo 0) + $("${GREP_RN[@]}" -e "Thread\.ofVirtual\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true) ))
+if [ "$virt_threads" -gt 0 ]; then print_finding "info" "$virt_threads" "Virtual threads in use - ensure blocking operations are appropriate"; fi
+
+print_subheader "StructuredTaskScope"
+scope_cnt=$("${GREP_RN[@]}" -e "StructuredTaskScope" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$scope_cnt" -gt 0 ]; then print_finding "info" "$scope_cnt" "StructuredTaskScope in use - validate proper join/shutdown handling"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 65: SQL CONSTRUCTION (HEURISTICS)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 65; then
+print_header "65. SQL CONSTRUCTION (HEURISTICS)"
+print_category "Detects: string-concatenated SQL, Statement.executeQuery with + operator" \
+  "Prefer prepared statements with parameters to avoid injection"
+
+print_subheader "String-concatenated SQL"
+sql_concat=$("${GREP_RN[@]}" -e "\"(SELECT|INSERT|UPDATE|DELETE)[^\"]*\"[[:space:]]*\\+[[:space:]]*[A-Za-z0-9_]" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$sql_concat" -gt 0 ]; then
+  print_finding "warning" "$sql_concat" "SQL built via concatenation - prefer parameters"
+  show_detailed_finding "execute(Query|Update)\s*\([^)]*\+" 3
+fi
+
+print_subheader "Statement.executeQuery with concatenation"
+exec_concat=$("${GREP_RN[@]}" -e "execute(Query|Update)\s*\(" "$PROJECT_DIR" 2>/dev/null | (grep "\+" || true) | count_lines)
+if [ "$exec_concat" -gt 0 ]; then
+  print_finding "warning" "$exec_concat" "execute* called with concatenated query string"
+  show_detailed_finding "execute(Query|Update)\s*\([^)]*\+" 3
+elif [ "$sql_concat" -eq 0 ]; then
+  mapfile -t sql_meta < <(java_pattern_scan sql_concat)
+  sql_fallback="${sql_meta[0]:-0}"
+  sql_samples="${sql_meta[1]:-}"
+  if [ "${sql_fallback:-0}" -gt 0 ]; then
+    sql_desc="Prefer PreparedStatement parameters over string concatenation"
+    if [ -n "$sql_samples" ]; then
+      sql_desc+=" (e.g., ${sql_samples%%,*})"
+    fi
+    print_finding "warning" "$sql_fallback" "SQL built via concatenation - prefer parameters" "$sql_desc"
+  fi
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 66: ANNOTATIONS & NULLNESS (HEURISTICS)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 66; then
+print_header "66. ANNOTATIONS & NULLNESS (HEURISTICS)"
+print_category "Detects: @Nullable without guard (approx), @Deprecated usages" \
+  "Annotation-driven contracts must be respected"
+
+print_subheader "@Nullable parameters used without null guard (approx)"
+nullable_params=$("${GREP_RN[@]}" -e "@Nullable" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$nullable_params" -gt 0 ]; then print_finding "info" "$nullable_params" "@Nullable present - ensure null checks at use sites"; fi
+
+print_subheader "Usage of @Deprecated APIs"
+deprecated_use=$("${GREP_RN[@]}" -e "@Deprecated|@deprecated" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$deprecated_use" -gt 0 ]; then print_finding "info" "$deprecated_use" "Deprecated annotations present - verify migration plans"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 67: AST-GREP RULE PACK FINDINGS (JSON/SARIF passthrough)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 67; then
+print_header "67. AST-GREP RULE PACK FINDINGS"
+if [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_RULE_DIR" ]]; then
+  run_ast_rules || true
+  say "${DIM}${INFO} Above JSON/SARIF lines are ast-grep matches (id, message, severity, file/pos).${RESET}"
+  if [[ "$FORMAT" == "sarif" ]]; then
+    say "${DIM}${INFO} Tip: ${BOLD}${AST_GREP_CMD[*]} scan -r $AST_RULE_DIR \"$PROJECT_DIR\" --sarif > report.sarif${RESET}"
+  fi
+else
+  say "${YELLOW}${WARN} ast-grep scan subcommand unavailable; rule-pack mode skipped.${RESET}"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 68: BUILD HEALTH (Maven/Gradle best-effort)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 68; then
+print_header "68. BUILD HEALTH (Maven/Gradle)"
+print_category "Runs: compile/test-compile tasks; optional lint tasks if configured" \
+  "Ensures the project compiles; inventories warnings/errors"
+
+if [[ "$RUN_BUILD" -eq 1 ]]; then
+  # Maven compile
+  if [[ "$HAS_MAVEN" -eq 1 && -f "$PROJECT_DIR/pom.xml" ]]; then
+    MVN_BIN="${MVNW:-mvn}"
+    MVN_LOG="$(mktemp)"
+    run_cmd_log "$MVN_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$MVN_BIN\" -q -e -T1C -DskipTests=true -DskipITs=true -Dmaven.test.skip.exec=true -Dspotbugs.skip=true -Dpmd.skip=true -Dcheckstyle.skip=true -Denforcer.skip=true -Dgpg.skip=true -Dlicense.skip=true -Drat.skip=true -Djacoco.skip=true -Danimal.sniffer.skip=true -Dskip.npm -Dskip.yarn -Dskip.node -DskipFrontend -Dfrontend.skip=true -U -B compile"
+    mvn_ec=$(cat "$MVN_LOG.ec" 2>/dev/null || echo 0)
+    w_e=$(count_warnings_errors_text "$MVN_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+    if [[ "$mvn_ec" -ne 0 || "$e" -gt 0 ]]; then print_finding "critical" "$e" "Maven compile errors detected"; else print_finding "good" "Maven compile OK"; fi
+    if [[ "$w" -gt 0 ]]; then print_finding "warning" "$w" "Maven compile warnings"; fi
+  fi
+
+  # Gradle compile
+  if [[ "$HAS_GRADLE" -eq 1 && ( -f "$PROJECT_DIR/build.gradle" || -f "$PROJECT_DIR/build.gradle.kts" ) ]]; then
+    GR_BIN="${GRADLEW:-gradle}"
+    GR_TASKS="$(mktemp)"
+    run_cmd_log "$GR_TASKS" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q tasks --all"
+    GR_LOG="$(mktemp)"
+    run_cmd_log "$GR_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q classes testClasses -x test"
+    gr_ec=$(cat "$GR_LOG.ec" 2>/dev/null || echo 0)
+    w_e=$(count_warnings_errors_text "$GR_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+    if [[ "$gr_ec" -ne 0 || "$e" -gt 0 ]]; then print_finding "critical" "$e" "Gradle compile errors detected"; else print_finding "good" "Gradle compile OK"; fi
+    if [[ "$w" -gt 0 ]]; then print_finding "warning" "$w" "Gradle compile warnings"; fi
+
+    # Try optional lint tasks if they exist
+    if grep -q "checkstyleMain" "$GR_TASKS"; then
+      CS_LOG="$(mktemp)"; run_cmd_log "$CS_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q checkstyleMain -x test"
+      w_e=$(count_warnings_errors_text "$CS_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+      if [[ "$e" -gt 0 ]]; then print_finding "warning" "$e" "Checkstyle issues (Gradle)"; fi
+    fi
+    if grep -q "pmdMain" "$GR_TASKS"; then
+      PMD_LOG="$(mktemp)"; run_cmd_log "$PMD_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q pmdMain -x test"
+      w_e=$(count_warnings_errors_text "$PMD_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+      if [[ "$e" -gt 0 || "$w" -gt 0 ]]; then print_finding "warning" "$((w+e))" "PMD issues (Gradle)"; fi
+    fi
+    if grep -q "spotbugsMain" "$GR_TASKS"; then
+      SB_LOG="$(mktemp)"; run_cmd_log "$SB_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q spotbugsMain -x test"
+      if grep -qi "bug" "$SB_LOG"; then
+        sb_cnt=$(grep -i "bug" "$SB_LOG" | wc -l | awk '{print $1+0}')
+        print_finding "warning" "$sb_cnt" "SpotBugs reported potential issues"
+      fi
+    fi
+  fi
+else
+  print_finding "info" 1 "Build checks disabled (--no-build)"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 69: META STATISTICS & INVENTORY
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 69; then
+print_header "69. META STATISTICS & INVENTORY"
+print_category "Detects: project type (Maven/Gradle), Java version" \
+  "High-level overview of the project"
+
+proj_type="Unknown"
+if [[ -f "$PROJECT_DIR/pom.xml" ]]; then proj_type="Maven"; fi
+if [[ -f "$PROJECT_DIR/build.gradle" || -f "$PROJECT_DIR/build.gradle.kts" ]]; then proj_type="Gradle"; fi
+say "  ${BLUE}${INFO} Info${RESET} ${WHITE}(project:${RESET} ${CYAN}${proj_type}${RESET}${WHITE}, java:${RESET} ${CYAN}${JAVA_VERSION_STR:-unknown}${RESET}${WHITE})${RESET}"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 70: MISC API MISUSE
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 70; then
+print_header "70. MISC API MISUSE"
+print_category "Detects: System.runFinalizersOnExit, Thread.stop, setAccessible(true)" \
+  "Legacy and unsafe APIs"
+
+print_subheader "Legacy/unsafe API calls"
+finalizers=$("${GREP_RN[@]}" -e "System\.runFinalizersOnExit\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+thread_stop=$("${GREP_RN[@]}" -e "Thread\.stop\(|Thread\.suspend\(|Thread\.resume\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+set_access=$("${GREP_RN[@]}" -e "\.setAccessible\(\s*true\s*\)" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$finalizers" -gt 0 ]; then print_finding "critical" "$finalizers" "System.runFinalizersOnExit used - do not use"; fi
+if [ "$thread_stop" -gt 0 ]; then print_finding "critical" "$thread_stop" "Thread.stop/suspend/resume used - unsafe"; fi
+if [ "$set_access" -gt 0 ]; then print_finding "info" "$set_access" "setAccessible(true) used - restrict usage"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 71: REGEX & STRING PITFALLS
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 71; then
+print_header "71. REGEX & STRING PITFALLS"
+print_category "Detects: ReDoS patterns, Pattern.compile with variables, toLowerCase/equals" \
+  "String/regex bugs cause performance issues and subtle mismatches"
+
+print_subheader "Nested quantifiers (ReDoS risk)"
+redos_cnt=$("${GREP_RN[@]}" -e "\([^)]*\+[^)]*\)\+|\([^)]*\*[^)]*\)\+" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$redos_cnt" -gt 0 ]; then print_finding "warning" "$redos_cnt" "Regex contains nested quantifiers - potential ReDoS"; show_detailed_finding "\([^)]*\+[^)]*\)\+|\([^)]*\*[^)]*\)\+" 3; fi
+
+print_subheader "Pattern.compile with variables (injection risk)"
+dyn_pat=$("${GREP_RN[@]}" -e "Pattern\.compile\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\)" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$dyn_pat" -gt 0 ]; then print_finding "info" "$dyn_pat" "Dynamic Pattern.compile detected - sanitize/escape user input"; fi
+
+print_subheader "Case handling via toLowerCase()/toUpperCase() then equals"
+case_cmp=$("${GREP_RN[@]}" -e "\.to(Lower|Upper)Case\(\)\.equals\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$case_cmp" -gt 0 ]; then print_finding "info" "$case_cmp" "Prefer equalsIgnoreCase or use Locale"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 72: COLLECTIONS & GENERICS
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 72; then
+print_header "72. COLLECTIONS & GENERICS"
+print_category "Detects: raw types, legacy Vector/Hashtable, remove in foreach" \
+  "Raw types and mutation during iteration cause runtime errors"
+
+print_subheader "Raw generic types (List/Map/Set without <...>)"
+raw_types=$("${GREP_RN[@]}" -e "\b(List|Map|Set)\s+[a-zA-Z_][a-zA-Z0-9_]*\s*(=|;)" "$PROJECT_DIR" 2>/dev/null | (grep -v '<' || true) | count_lines)
+if [ "$raw_types" -gt 0 ]; then print_finding "warning" "$raw_types" "Raw generic types used"; fi
+
+print_subheader "Legacy synchronized collections"
+legacy=$(( $(ast_search 'new java.util.Vector($$)' || echo 0) + $(ast_search 'new java.util.Hashtable($$)' || echo 0) + $("${GREP_RN[@]}" -e "new[[:space:]]+(Vector|Hashtable)\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true) ))
+if [ "$legacy" -gt 0 ]; then print_finding "info" "$legacy" "Vector/Hashtable detected"; fi
+
+print_subheader "Collection modification during foreach (heuristic)"
+mod_foreach=$("${GREP_RN[@]}" -e "for\s*\([^)]+:[^)]+\)\s*\{" "$PROJECT_DIR" 2>/dev/null | (grep -A3 -F ".remove(" || true) | (grep -c -F ".remove(" || true))
+mod_foreach=$(echo "$mod_foreach" | awk 'END{print $0+0}')
+if [ "$mod_foreach" -gt 0 ]; then print_finding "warning" "$mod_foreach" "Possible modification of collection during iteration"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 73: SWITCH & CONTROL FLOW
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 73; then
+print_header "73. SWITCH & CONTROL FLOW"
+print_category "Detects: fall-through (classic switch), switch without default" \
+  "Control flow bugs cause unexpected behavior"
+
+print_subheader "Classic switch fall-through (ignore '->' labels)"
+switch_count=$("${GREP_RN[@]}" -e "switch\s*\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+case_count=$("${GREP_RN[@]}" -e "case[[:space:]]+.*:" "$PROJECT_DIR" 2>/dev/null | (grep -v -- "->" || true) | count_lines || true)
+break_count=$("${GREP_RN[@]}" -e "\bbreak\s*;" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$case_count" -gt "$break_count" ] && [ "$case_count" -gt 0 ]; then
+  diff=$((case_count - break_count))
+  print_finding "warning" "$diff" "Switch cases may be missing break (classic switch)"
+fi
+
+print_subheader "Switch without default (classic switch)"
+default_count=$("${GREP_RN[@]}" -e "default[[:space:]]*:" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$switch_count" -gt "$default_count" ] && [ "$switch_count" -gt 0 ]; then
+  diff=$((switch_count - default_count))
+  print_finding "info" "$diff" "Some switch statements have no default case (classic syntax)"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 74: SERIALIZATION & COMPATIBILITY
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 74; then
+print_header "74. SERIALIZATION & COMPATIBILITY"
+print_category "Detects: implements Serializable, readObject/writeObject" \
+  "Serialization hazards and maintenance burdens"
+
+print_subheader "Serializable implementations (inventory)"
+serializable=$("${GREP_RN[@]}" -e "implements\s+Serializable\b" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$serializable" -gt 0 ]; then print_finding "info" "$serializable" "Classes implement Serializable - audit necessity"; fi
+
+print_subheader "Custom readObject/writeObject methods"
+custom_ser=$("${GREP_RN[@]}" -e "void\s+readObject\s*\(|void\s+writeObject\s*\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$custom_ser" -gt 0 ]; then print_finding "info" "$custom_ser" "Custom serialization hooks present - validate invariants"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 75: JAVA 21 FEATURES (INFO)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 75; then
+print_header "75. JAVA 21 FEATURES (INFO)"
+print_category "Detects: Virtual Threads, Structured Concurrency, Sequenced Collections" \
+  "Inventory of modern APIs to guide reviews for correct usage"
+
+print_subheader "Virtual Threads"
+virt_threads=$(( $(ast_search 'java.lang.Thread.ofVirtual().start($$)' || echo 0) + $("${GREP_RN[@]}" -e "Thread\.ofVirtual\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true) ))
+if [ "$virt_threads" -gt 0 ]; then print_finding "info" "$virt_threads" "Virtual threads in use - ensure blocking operations are appropriate"; fi
+
+print_subheader "StructuredTaskScope"
+scope_cnt=$("${GREP_RN[@]}" -e "StructuredTaskScope" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$scope_cnt" -gt 0 ]; then print_finding "info" "$scope_cnt" "StructuredTaskScope in use - validate proper join/shutdown handling"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 76: SQL CONSTRUCTION (HEURISTICS)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 76; then
+print_header "76. SQL CONSTRUCTION (HEURISTICS)"
+print_category "Detects: string-concatenated SQL, Statement.executeQuery with + operator" \
+  "Prefer prepared statements with parameters to avoid injection"
+
+print_subheader "String-concatenated SQL"
+sql_concat=$("${GREP_RN[@]}" -e "\"(SELECT|INSERT|UPDATE|DELETE)[^\"]*\"[[:space:]]*\\+[[:space:]]*[A-Za-z0-9_]" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$sql_concat" -gt 0 ]; then
+  print_finding "warning" "$sql_concat" "SQL built via concatenation - prefer parameters"
+  show_detailed_finding "execute(Query|Update)\s*\([^)]*\+" 3
+fi
+
+print_subheader "Statement.executeQuery with concatenation"
+exec_concat=$("${GREP_RN[@]}" -e "execute(Query|Update)\s*\(" "$PROJECT_DIR" 2>/dev/null | (grep "\+" || true) | count_lines)
+if [ "$exec_concat" -gt 0 ]; then
+  print_finding "warning" "$exec_concat" "execute* called with concatenated query string"
+  show_detailed_finding "execute(Query|Update)\s*\([^)]*\+" 3
+elif [ "$sql_concat" -eq 0 ]; then
+  mapfile -t sql_meta < <(java_pattern_scan sql_concat)
+  sql_fallback="${sql_meta[0]:-0}"
+  sql_samples="${sql_meta[1]:-}"
+  if [ "${sql_fallback:-0}" -gt 0 ]; then
+    sql_desc="Prefer PreparedStatement parameters over string concatenation"
+    if [ -n "$sql_samples" ]; then
+      sql_desc+=" (e.g., ${sql_samples%%,*})"
+    fi
+    print_finding "warning" "$sql_fallback" "SQL built via concatenation - prefer parameters" "$sql_desc"
+  fi
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 77: ANNOTATIONS & NULLNESS (HEURISTICS)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 77; then
+print_header "77. ANNOTATIONS & NULLNESS (HEURISTICS)"
+print_category "Detects: @Nullable without guard (approx), @Deprecated usages" \
+  "Annotation-driven contracts must be respected"
+
+print_subheader "@Nullable parameters used without null guard (approx)"
+nullable_params=$("${GREP_RN[@]}" -e "@Nullable" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$nullable_params" -gt 0 ]; then print_finding "info" "$nullable_params" "@Nullable present - ensure null checks at use sites"; fi
+
+print_subheader "Usage of @Deprecated APIs"
+deprecated_use=$("${GREP_RN[@]}" -e "@Deprecated|@deprecated" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$deprecated_use" -gt 0 ]; then print_finding "info" "$deprecated_use" "Deprecated annotations present - verify migration plans"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 78: AST-GREP RULE PACK FINDINGS (JSON/SARIF passthrough)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 78; then
+print_header "78. AST-GREP RULE PACK FINDINGS"
+if [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_RULE_DIR" ]]; then
+  run_ast_rules || true
+  say "${DIM}${INFO} Above JSON/SARIF lines are ast-grep matches (id, message, severity, file/pos).${RESET}"
+  if [[ "$FORMAT" == "sarif" ]]; then
+    say "${DIM}${INFO} Tip: ${BOLD}${AST_GREP_CMD[*]} scan -r $AST_RULE_DIR \"$PROJECT_DIR\" --sarif > report.sarif${RESET}"
+  fi
+else
+  say "${YELLOW}${WARN} ast-grep scan subcommand unavailable; rule-pack mode skipped.${RESET}"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 79: BUILD HEALTH (Maven/Gradle best-effort)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 79; then
+print_header "79. BUILD HEALTH (Maven/Gradle)"
+print_category "Runs: compile/test-compile tasks; optional lint tasks if configured" \
+  "Ensures the project compiles; inventories warnings/errors"
+
+if [[ "$RUN_BUILD" -eq 1 ]]; then
+  # Maven compile
+  if [[ "$HAS_MAVEN" -eq 1 && -f "$PROJECT_DIR/pom.xml" ]]; then
+    MVN_BIN="${MVNW:-mvn}"
+    MVN_LOG="$(mktemp)"
+    run_cmd_log "$MVN_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$MVN_BIN\" -q -e -T1C -DskipTests=true -DskipITs=true -Dmaven.test.skip.exec=true -Dspotbugs.skip=true -Dpmd.skip=true -Dcheckstyle.skip=true -Denforcer.skip=true -Dgpg.skip=true -Dlicense.skip=true -Drat.skip=true -Djacoco.skip=true -Danimal.sniffer.skip=true -Dskip.npm -Dskip.yarn -Dskip.node -DskipFrontend -Dfrontend.skip=true -U -B compile"
+    mvn_ec=$(cat "$MVN_LOG.ec" 2>/dev/null || echo 0)
+    w_e=$(count_warnings_errors_text "$MVN_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+    if [[ "$mvn_ec" -ne 0 || "$e" -gt 0 ]]; then print_finding "critical" "$e" "Maven compile errors detected"; else print_finding "good" "Maven compile OK"; fi
+    if [[ "$w" -gt 0 ]]; then print_finding "warning" "$w" "Maven compile warnings"; fi
+  fi
+
+  # Gradle compile
+  if [[ "$HAS_GRADLE" -eq 1 && ( -f "$PROJECT_DIR/build.gradle" || -f "$PROJECT_DIR/build.gradle.kts" ) ]]; then
+    GR_BIN="${GRADLEW:-gradle}"
+    GR_TASKS="$(mktemp)"
+    run_cmd_log "$GR_TASKS" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q tasks --all"
+    GR_LOG="$(mktemp)"
+    run_cmd_log "$GR_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q classes testClasses -x test"
+    gr_ec=$(cat "$GR_LOG.ec" 2>/dev/null || echo 0)
+    w_e=$(count_warnings_errors_text "$GR_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+    if [[ "$gr_ec" -ne 0 || "$e" -gt 0 ]]; then print_finding "critical" "$e" "Gradle compile errors detected"; else print_finding "good" "Gradle compile OK"; fi
+    if [[ "$w" -gt 0 ]]; then print_finding "warning" "$w" "Gradle compile warnings"; fi
+
+    # Try optional lint tasks if they exist
+    if grep -q "checkstyleMain" "$GR_TASKS"; then
+      CS_LOG="$(mktemp)"; run_cmd_log "$CS_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q checkstyleMain -x test"
+      w_e=$(count_warnings_errors_text "$CS_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+      if [[ "$e" -gt 0 ]]; then print_finding "warning" "$e" "Checkstyle issues (Gradle)"; fi
+    fi
+    if grep -q "pmdMain" "$GR_TASKS"; then
+      PMD_LOG="$(mktemp)"; run_cmd_log "$PMD_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q pmdMain -x test"
+      w_e=$(count_warnings_errors_text "$PMD_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+      if [[ "$e" -gt 0 || "$w" -gt 0 ]]; then print_finding "warning" "$((w+e))" "PMD issues (Gradle)"; fi
+    fi
+    if grep -q "spotbugsMain" "$GR_TASKS"; then
+      SB_LOG="$(mktemp)"; run_cmd_log "$SB_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q spotbugsMain -x test"
+      if grep -qi "bug" "$SB_LOG"; then
+        sb_cnt=$(grep -i "bug" "$SB_LOG" | wc -l | awk '{print $1+0}')
+        print_finding "warning" "$sb_cnt" "SpotBugs reported potential issues"
+      fi
+    fi
+  fi
+else
+  print_finding "info" 1 "Build checks disabled (--no-build)"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 80: META STATISTICS & INVENTORY
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 80; then
+print_header "80. META STATISTICS & INVENTORY"
+print_category "Detects: project type (Maven/Gradle), Java version" \
+  "High-level overview of the project"
+
+proj_type="Unknown"
+if [[ -f "$PROJECT_DIR/pom.xml" ]]; then proj_type="Maven"; fi
+if [[ -f "$PROJECT_DIR/build.gradle" || -f "$PROJECT_DIR/build.gradle.kts" ]]; then proj_type="Gradle"; fi
+say "  ${BLUE}${INFO} Info${RESET} ${WHITE}(project:${RESET} ${CYAN}${proj_type}${RESET}${WHITE}, java:${RESET} ${CYAN}${JAVA_VERSION_STR:-unknown}${RESET}${WHITE})${RESET}"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 81: MISC API MISUSE
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 81; then
+print_header "81. MISC API MISUSE"
+print_category "Detects: System.runFinalizersOnExit, Thread.stop, setAccessible(true)" \
+  "Legacy and unsafe APIs"
+
+print_subheader "Legacy/unsafe API calls"
+finalizers=$("${GREP_RN[@]}" -e "System\.runFinalizersOnExit\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+thread_stop=$("${GREP_RN[@]}" -e "Thread\.stop\(|Thread\.suspend\(|Thread\.resume\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+set_access=$("${GREP_RN[@]}" -e "\.setAccessible\(\s*true\s*\)" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$finalizers" -gt 0 ]; then print_finding "critical" "$finalizers" "System.runFinalizersOnExit used - do not use"; fi
+if [ "$thread_stop" -gt 0 ]; then print_finding "critical" "$thread_stop" "Thread.stop/suspend/resume used - unsafe"; fi
+if [ "$set_access" -gt 0 ]; then print_finding "info" "$set_access" "setAccessible(true) used - restrict usage"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 82: REGEX & STRING PITFALLS
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 82; then
+print_header "82. REGEX & STRING PITFALLS"
+print_category "Detects: ReDoS patterns, Pattern.compile with variables, toLowerCase/equals" \
+  "String/regex bugs cause performance issues and subtle mismatches"
+
+print_subheader "Nested quantifiers (ReDoS risk)"
+redos_cnt=$("${GREP_RN[@]}" -e "\([^)]*\+[^)]*\)\+|\([^)]*\*[^)]*\)\+" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$redos_cnt" -gt 0 ]; then print_finding "warning" "$redos_cnt" "Regex contains nested quantifiers - potential ReDoS"; show_detailed_finding "\([^)]*\+[^)]*\)\+|\([^)]*\*[^)]*\)\+" 3; fi
+
+print_subheader "Pattern.compile with variables (injection risk)"
+dyn_pat=$("${GREP_RN[@]}" -e "Pattern\.compile\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\)" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$dyn_pat" -gt 0 ]; then print_finding "info" "$dyn_pat" "Dynamic Pattern.compile detected - sanitize/escape user input"; fi
+
+print_subheader "Case handling via toLowerCase()/toUpperCase() then equals"
+case_cmp=$("${GREP_RN[@]}" -e "\.to(Lower|Upper)Case\(\)\.equals\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$case_cmp" -gt 0 ]; then print_finding "info" "$case_cmp" "Prefer equalsIgnoreCase or use Locale"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 83: COLLECTIONS & GENERICS
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 83; then
+print_header "83. COLLECTIONS & GENERICS"
+print_category "Detects: raw types, legacy Vector/Hashtable, remove in foreach" \
+  "Raw types and mutation during iteration cause runtime errors"
+
+print_subheader "Raw generic types (List/Map/Set without <...>)"
+raw_types=$("${GREP_RN[@]}" -e "\b(List|Map|Set)\s+[a-zA-Z_][a-zA-Z0-9_]*\s*(=|;)" "$PROJECT_DIR" 2>/dev/null | (grep -v '<' || true) | count_lines)
+if [ "$raw_types" -gt 0 ]; then print_finding "warning" "$raw_types" "Raw generic types used"; fi
+
+print_subheader "Legacy synchronized collections"
+legacy=$(( $(ast_search 'new java.util.Vector($$)' || echo 0) + $(ast_search 'new java.util.Hashtable($$)' || echo 0) + $("${GREP_RN[@]}" -e "new[[:space:]]+(Vector|Hashtable)\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true) ))
+if [ "$legacy" -gt 0 ]; then print_finding "info" "$legacy" "Vector/Hashtable detected"; fi
+
+print_subheader "Collection modification during foreach (heuristic)"
+mod_foreach=$("${GREP_RN[@]}" -e "for\s*\([^)]+:[^)]+\)\s*\{" "$PROJECT_DIR" 2>/dev/null | (grep -A3 -F ".remove(" || true) | (grep -c -F ".remove(" || true))
+mod_foreach=$(echo "$mod_foreach" | awk 'END{print $0+0}')
+if [ "$mod_foreach" -gt 0 ]; then print_finding "warning" "$mod_foreach" "Possible modification of collection during iteration"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 84: SWITCH & CONTROL FLOW
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 84; then
+print_header "84. SWITCH & CONTROL FLOW"
+print_category "Detects: fall-through (classic switch), switch without default" \
+  "Control flow bugs cause unexpected behavior"
+
+print_subheader "Classic switch fall-through (ignore '->' labels)"
+switch_count=$("${GREP_RN[@]}" -e "switch\s*\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+case_count=$("${GREP_RN[@]}" -e "case[[:space:]]+.*:" "$PROJECT_DIR" 2>/dev/null | (grep -v -- "->" || true) | count_lines || true)
+break_count=$("${GREP_RN[@]}" -e "\bbreak\s*;" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$case_count" -gt "$break_count" ] && [ "$case_count" -gt 0 ]; then
+  diff=$((case_count - break_count))
+  print_finding "warning" "$diff" "Switch cases may be missing break (classic switch)"
+fi
+
+print_subheader "Switch without default (classic switch)"
+default_count=$("${GREP_RN[@]}" -e "default[[:space:]]*:" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$switch_count" -gt "$default_count" ] && [ "$switch_count" -gt 0 ]; then
+  diff=$((switch_count - default_count))
+  print_finding "info" "$diff" "Some switch statements have no default case (classic syntax)"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 85: SERIALIZATION & COMPATIBILITY
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 85; then
+print_header "85. SERIALIZATION & COMPATIBILITY"
+print_category "Detects: implements Serializable, readObject/writeObject" \
+  "Serialization hazards and maintenance burdens"
+
+print_subheader "Serializable implementations (inventory)"
+serializable=$("${GREP_RN[@]}" -e "implements\s+Serializable\b" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$serializable" -gt 0 ]; then print_finding "info" "$serializable" "Classes implement Serializable - audit necessity"; fi
+
+print_subheader "Custom readObject/writeObject methods"
+custom_ser=$("${GREP_RN[@]}" -e "void\s+readObject\s*\(|void\s+writeObject\s*\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$custom_ser" -gt 0 ]; then print_finding "info" "$custom_ser" "Custom serialization hooks present - validate invariants"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 86: JAVA 21 FEATURES (INFO)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 86; then
+print_header "86. JAVA 21 FEATURES (INFO)"
+print_category "Detects: Virtual Threads, Structured Concurrency, Sequenced Collections" \
+  "Inventory of modern APIs to guide reviews for correct usage"
+
+print_subheader "Virtual Threads"
+virt_threads=$(( $(ast_search 'java.lang.Thread.ofVirtual().start($$)' || echo 0) + $("${GREP_RN[@]}" -e "Thread\.ofVirtual\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true) ))
+if [ "$virt_threads" -gt 0 ]; then print_finding "info" "$virt_threads" "Virtual threads in use - ensure blocking operations are appropriate"; fi
+
+print_subheader "StructuredTaskScope"
+scope_cnt=$("${GREP_RN[@]}" -e "StructuredTaskScope" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$scope_cnt" -gt 0 ]; then print_finding "info" "$scope_cnt" "StructuredTaskScope in use - validate proper join/shutdown handling"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 87: SQL CONSTRUCTION (HEURISTICS)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 87; then
+print_header "87. SQL CONSTRUCTION (HEURISTICS)"
+print_category "Detects: string-concatenated SQL, Statement.executeQuery with + operator" \
+  "Prefer prepared statements with parameters to avoid injection"
+
+print_subheader "String-concatenated SQL"
+sql_concat=$("${GREP_RN[@]}" -e "\"(SELECT|INSERT|UPDATE|DELETE)[^\"]*\"[[:space:]]*\\+[[:space:]]*[A-Za-z0-9_]" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$sql_concat" -gt 0 ]; then
+  print_finding "warning" "$sql_concat" "SQL built via concatenation - prefer parameters"
+  show_detailed_finding "execute(Query|Update)\s*\([^)]*\+" 3
+fi
+
+print_subheader "Statement.executeQuery with concatenation"
+exec_concat=$("${GREP_RN[@]}" -e "execute(Query|Update)\s*\(" "$PROJECT_DIR" 2>/dev/null | (grep "\+" || true) | count_lines)
+if [ "$exec_concat" -gt 0 ]; then
+  print_finding "warning" "$exec_concat" "execute* called with concatenated query string"
+  show_detailed_finding "execute(Query|Update)\s*\([^)]*\+" 3
+elif [ "$sql_concat" -eq 0 ]; then
+  mapfile -t sql_meta < <(java_pattern_scan sql_concat)
+  sql_fallback="${sql_meta[0]:-0}"
+  sql_samples="${sql_meta[1]:-}"
+  if [ "${sql_fallback:-0}" -gt 0 ]; then
+    sql_desc="Prefer PreparedStatement parameters over string concatenation"
+    if [ -n "$sql_samples" ]; then
+      sql_desc+=" (e.g., ${sql_samples%%,*})"
+    fi
+    print_finding "warning" "$sql_fallback" "SQL built via concatenation - prefer parameters" "$sql_desc"
+  fi
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 88: ANNOTATIONS & NULLNESS (HEURISTICS)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 88; then
+print_header "88. ANNOTATIONS & NULLNESS (HEURISTICS)"
+print_category "Detects: @Nullable without guard (approx), @Deprecated usages" \
+  "Annotation-driven contracts must be respected"
+
+print_subheader "@Nullable parameters used without null guard (approx)"
+nullable_params=$("${GREP_RN[@]}" -e "@Nullable" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$nullable_params" -gt 0 ]; then print_finding "info" "$nullable_params" "@Nullable present - ensure null checks at use sites"; fi
+
+print_subheader "Usage of @Deprecated APIs"
+deprecated_use=$("${GREP_RN[@]}" -e "@Deprecated|@deprecated" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$deprecated_use" -gt 0 ]; then print_finding "info" "$deprecated_use" "Deprecated annotations present - verify migration plans"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 89: AST-GREP RULE PACK FINDINGS (JSON/SARIF passthrough)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 89; then
+print_header "89. AST-GREP RULE PACK FINDINGS"
+if [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_RULE_DIR" ]]; then
+  run_ast_rules || true
+  say "${DIM}${INFO} Above JSON/SARIF lines are ast-grep matches (id, message, severity, file/pos).${RESET}"
+  if [[ "$FORMAT" == "sarif" ]]; then
+    say "${DIM}${INFO} Tip: ${BOLD}${AST_GREP_CMD[*]} scan -r $AST_RULE_DIR \"$PROJECT_DIR\" --sarif > report.sarif${RESET}"
+  fi
+else
+  say "${YELLOW}${WARN} ast-grep scan subcommand unavailable; rule-pack mode skipped.${RESET}"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 90: BUILD HEALTH (Maven/Gradle best-effort)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 90; then
+print_header "90. BUILD HEALTH (Maven/Gradle)"
+print_category "Runs: compile/test-compile tasks; optional lint tasks if configured" \
+  "Ensures the project compiles; inventories warnings/errors"
+
+if [[ "$RUN_BUILD" -eq 1 ]]; then
+  # Maven compile
+  if [[ "$HAS_MAVEN" -eq 1 && -f "$PROJECT_DIR/pom.xml" ]]; then
+    MVN_BIN="${MVNW:-mvn}"
+    MVN_LOG="$(mktemp)"
+    run_cmd_log "$MVN_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$MVN_BIN\" -q -e -T1C -DskipTests=true -DskipITs=true -Dmaven.test.skip.exec=true -Dspotbugs.skip=true -Dpmd.skip=true -Dcheckstyle.skip=true -Denforcer.skip=true -Dgpg.skip=true -Dlicense.skip=true -Drat.skip=true -Djacoco.skip=true -Danimal.sniffer.skip=true -Dskip.npm -Dskip.yarn -Dskip.node -DskipFrontend -Dfrontend.skip=true -U -B compile"
+    mvn_ec=$(cat "$MVN_LOG.ec" 2>/dev/null || echo 0)
+    w_e=$(count_warnings_errors_text "$MVN_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+    if [[ "$mvn_ec" -ne 0 || "$e" -gt 0 ]]; then print_finding "critical" "$e" "Maven compile errors detected"; else print_finding "good" "Maven compile OK"; fi
+    if [[ "$w" -gt 0 ]]; then print_finding "warning" "$w" "Maven compile warnings"; fi
+  fi
+
+  # Gradle compile
+  if [[ "$HAS_GRADLE" -eq 1 && ( -f "$PROJECT_DIR/build.gradle" || -f "$PROJECT_DIR/build.gradle.kts" ) ]]; then
+    GR_BIN="${GRADLEW:-gradle}"
+    GR_TASKS="$(mktemp)"
+    run_cmd_log "$GR_TASKS" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q tasks --all"
+    GR_LOG="$(mktemp)"
+    run_cmd_log "$GR_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q classes testClasses -x test"
+    gr_ec=$(cat "$GR_LOG.ec" 2>/dev/null || echo 0)
+    w_e=$(count_warnings_errors_text "$GR_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+    if [[ "$gr_ec" -ne 0 || "$e" -gt 0 ]]; then print_finding "critical" "$e" "Gradle compile errors detected"; else print_finding "good" "Gradle compile OK"; fi
+    if [[ "$w" -gt 0 ]]; then print_finding "warning" "$w" "Gradle compile warnings"; fi
+
+    # Try optional lint tasks if they exist
+    if grep -q "checkstyleMain" "$GR_TASKS"; then
+      CS_LOG="$(mktemp)"; run_cmd_log "$CS_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q checkstyleMain -x test"
+      w_e=$(count_warnings_errors_text "$CS_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+      if [[ "$e" -gt 0 ]]; then print_finding "warning" "$e" "Checkstyle issues (Gradle)"; fi
+    fi
+    if grep -q "pmdMain" "$GR_TASKS"; then
+      PMD_LOG="$(mktemp)"; run_cmd_log "$PMD_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q pmdMain -x test"
+      w_e=$(count_warnings_errors_text "$PMD_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
+      if [[ "$e" -gt 0 || "$w" -gt 0 ]]; then print_finding "warning" "$((w+e))" "PMD issues (Gradle)"; fi
+    fi
+    if grep -q "spotbugsMain" "$GR_TASKS"; then
+      SB_LOG="$(mktemp)"; run_cmd_log "$SB_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q spotbugsMain -x test"
+      if grep -qi "bug" "$SB_LOG"; then
+        sb_cnt=$(grep -i "bug" "$SB_LOG" | wc -l | awk '{print $1+0}')
+        print_finding "warning" "$sb_cnt" "SpotBugs reported potential issues"
+      fi
+    fi
+  fi
+else
+  print_finding "info" 1 "Build checks disabled (--no-build)"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 91: META STATISTICS & INVENTORY
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 91; then
+print_header "91. META STATISTICS & INVENTORY"
+print_category "Detects: project type (Maven/Gradle), Java version" \
+  "High-level overview of the project"
+
+proj_type="Unknown"
+if [[ -f "$PROJECT_DIR/pom.xml" ]]; then proj_type="Maven"; fi
+if [[ -f "$PROJECT_DIR/build.gradle" || -f "$PROJECT_DIR/build.gradle.kts" ]]; then proj_type="Gradle"; fi
+say "  ${BLUE}${INFO} Info${RESET} ${WHITE}(project:${RESET} ${CYAN}${proj_type}${RESET}${WHITE}, java:${RESET} ${CYAN}${JAVA_VERSION_STR:-unknown}${RESET}${WHITE})${RESET}"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 92: MISC API MISUSE
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 92; then
+print_header "92. MISC API MISUSE"
+print_category "Detects: System.runFinalizersOnExit, Thread.stop, setAccessible(true)" \
+  "Legacy and unsafe APIs"
+
+print_subheader "Legacy/unsafe API calls"
+finalizers=$("${GREP_RN[@]}" -e "System\.runFinalizersOnExit\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+thread_stop=$("${GREP_RN[@]}" -e "Thread\.stop\(|Thread\.suspend\(|Thread\.resume\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+set_access=$("${GREP_RN[@]}" -e "\.setAccessible\(\s*true\s*\)" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$finalizers" -gt 0 ]; then print_finding "critical" "$finalizers" "System.runFinalizersOnExit used - do not use"; fi
+if [ "$thread_stop" -gt 0 ]; then print_finding "critical" "$thread_stop" "Thread.stop/suspend/resume used - unsafe"; fi
+if [ "$set_access" -gt 0 ]; then print_finding "info" "$set_access" "setAccessible(true) used - restrict usage"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 93: REGEX & STRING PITFALLS
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 93; then
+print_header "93. REGEX & STRING PITFALLS"
+print_category "Detects: ReDoS patterns, Pattern.compile with variables, toLowerCase/equals" \
+  "String/regex bugs cause performance issues and subtle mismatches"
+
+print_subheader "Nested quantifiers (ReDoS risk)"
+redos_cnt=$("${GREP_RN[@]}" -e "\([^)]*\+[^)]*\)\+|\([^)]*\*[^)]*\)\+" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$redos_cnt" -gt 0 ]; then print_finding "warning" "$redos_cnt" "Regex contains nested quantifiers - potential ReDoS"; show_detailed_finding "\([^)]*\+[^)]*\)\+|\([^)]*\*[^)]*\)\+" 3; fi
+
+print_subheader "Pattern.compile with variables (injection risk)"
+dyn_pat=$("${GREP_RN[@]}" -e "Pattern\.compile\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\)" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$dyn_pat" -gt 0 ]; then print_finding "info" "$dyn_pat" "Dynamic Pattern.compile detected - sanitize/escape user input"; fi
+
+print_subheader "Case handling via toLowerCase()/toUpperCase() then equals"
+case_cmp=$("${GREP_RN[@]}" -e "\.to(Lower|Upper)Case\(\)\.equals\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$case_cmp" -gt 0 ]; then print_finding "info" "$case_cmp" "Prefer equalsIgnoreCase or use Locale"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 94: COLLECTIONS & GENERICS
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 94; then
+print_header "94. COLLECTIONS & GENERICS"
+print_category "Detects: raw types, legacy Vector/Hashtable, remove in foreach" \
+  "Raw types and mutation during iteration cause runtime errors"
+
+print_subheader "Raw generic types (List/Map/Set without <...>)"
+raw_types=$("${GREP_RN[@]}" -e "\b(List|Map|Set)\s+[a-zA-Z_][a-zA-Z0-9_]*\s*(=|;)" "$PROJECT_DIR" 2>/dev/null | (grep -v '<' || true) | count_lines)
+if [ "$raw_types" -gt 0 ]; then print_finding "warning" "$raw_types" "Raw generic types used"; fi
+
+print_subheader "Legacy synchronized collections"
+legacy=$(( $(ast_search 'new java.util.Vector($$)' || echo 0) + $(ast_search 'new java.util.Hashtable($$)' || echo 0) + $("${GREP_RN[@]}" -e "new[[:space:]]+(Vector|Hashtable)\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true) ))
+if [ "$legacy" -gt 0 ]; then print_finding "info" "$legacy" "Vector/Hashtable detected"; fi
+
+print_subheader "Collection modification during foreach (heuristic)"
+mod_foreach=$("${GREP_RN[@]}" -e "for\s*\([^)]+:[^)]+\)\s*\{" "$PROJECT_DIR" 2>/dev/null | (grep -A3 -F ".remove(" || true) | (grep -c -F ".remove(" || true))
+mod_foreach=$(echo "$mod_foreach" | awk 'END{print $0+0}')
+if [ "$mod_foreach" -gt 0 ]; then print_finding "warning" "$mod_foreach" "Possible modification of collection during iteration"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 95: SWITCH & CONTROL FLOW
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 95; then
+print_header "95. SWITCH & CONTROL FLOW"
+print_category "Detects: fall-through (classic switch), switch without default" \
+  "Control flow bugs cause unexpected behavior"
+
+print_subheader "Classic switch fall-through (ignore '->' labels)"
+switch_count=$("${GREP_RN[@]}" -e "switch\s*\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+case_count=$("${GREP_RN[@]}" -e "case[[:space:]]+.*:" "$PROJECT_DIR" 2>/dev/null | (grep -v -- "->" || true) | count_lines || true)
+break_count=$("${GREP_RN[@]}" -e "\bbreak\s*;" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$case_count" -gt "$break_count" ] && [ "$case_count" -gt 0 ]; then
+  diff=$((case_count - break_count))
+  print_finding "warning" "$diff" "Switch cases may be missing break (classic switch)"
+fi
+
+print_subheader "Switch without default (classic switch)"
+default_count=$("${GREP_RN[@]}" -e "default[[:space:]]*:" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$switch_count" -gt "$default_count" ] && [ "$switch_count" -gt 0 ]; then
+  diff=$((switch_count - default_count))
+  print_finding "info" "$diff" "Some switch statements have no default case (classic syntax)"
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 96: SERIALIZATION & COMPATIBILITY
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 96; then
+print_header "96. SERIALIZATION & COMPATIBILITY"
+print_category "Detects: implements Serializable, readObject/writeObject" \
+  "Serialization hazards and maintenance burdens"
+
+print_subheader "Serializable implementations (inventory)"
+serializable=$("${GREP_RN[@]}" -e "implements\s+Serializable\b" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$serializable" -gt 0 ]; then print_finding "info" "$serializable" "Classes implement Serializable - audit necessity"; fi
+
+print_subheader "Custom readObject/writeObject methods"
+custom_ser=$("${GREP_RN[@]}" -e "void\s+readObject\s*\(|void\s+writeObject\s*\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$custom_ser" -gt 0 ]; then print_finding "info" "$custom_ser" "Custom serialization hooks present - validate invariants"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 97: JAVA 21 FEATURES (INFO)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 97; then
+print_header "97. JAVA 21 FEATURES (INFO)"
+print_category "Detects: Virtual Threads, Structured Concurrency, Sequenced Collections" \
+  "Inventory of modern APIs to guide reviews for correct usage"
+
+print_subheader "Virtual Threads"
+virt_threads=$(( $(ast_search 'java.lang.Thread.ofVirtual().start($$)' || echo 0) + $("${GREP_RN[@]}" -e "Thread\.ofVirtual\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true) ))
+if [ "$virt_threads" -gt 0 ]; then print_finding "info" "$virt_threads" "Virtual threads in use - ensure blocking operations are appropriate"; fi
+
+print_subheader "StructuredTaskScope"
+scope_cnt=$("${GREP_RN[@]}" -e "StructuredTaskScope" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$scope_cnt" -gt 0 ]; then print_finding "info" "$scope_cnt" "StructuredTaskScope in use - validate proper join/shutdown handling"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 98: SQL CONSTRUCTION (HEURISTICS)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 98; then
+print_header "98. SQL CONSTRUCTION (HEURISTICS)"
+print_category "Detects: string-concatenated SQL, Statement.executeQuery with + operator" \
+  "Prefer prepared statements with parameters to avoid injection"
+
+print_subheader "String-concatenated SQL"
+sql_concat=$("${GREP_RN[@]}" -e "\"(SELECT|INSERT|UPDATE|DELETE)[^\"]*\"[[:space:]]*\\+[[:space:]]*[A-Za-z0-9_]" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$sql_concat" -gt 0 ]; then
+  print_finding "warning" "$sql_concat" "SQL built via concatenation - prefer parameters"
+  show_detailed_finding "execute(Query|Update)\s*\([^)]*\+" 3
+fi
+
+print_subheader "Statement.executeQuery with concatenation"
+exec_concat=$("${GREP_RN[@]}" -e "execute(Query|Update)\s*\(" "$PROJECT_DIR" 2>/dev/null | (grep "\+" || true) | count_lines)
+if [ "$exec_concat" -gt 0 ]; then
+  print_finding "warning" "$exec_concat" "execute* called with concatenated query string"
+  show_detailed_finding "execute(Query|Update)\s*\([^)]*\+" 3
+elif [ "$sql_concat" -eq 0 ]; then
+  mapfile -t sql_meta < <(java_pattern_scan sql_concat)
+  sql_fallback="${sql_meta[0]:-0}"
+  sql_samples="${sql_meta[1]:-}"
+  if [ "${sql_fallback:-0}" -gt 0 ]; then
+    sql_desc="Prefer PreparedStatement parameters over string concatenation"
+    if [ -n "$sql_samples" ]; then
+      sql_desc+=" (e.g., ${sql_samples%%,*})"
+    fi
+    print_finding "warning" "$sql_fallback" "SQL built via concatenation - prefer parameters" "$sql_desc"
+  fi
+fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 99: ANNOTATIONS & NULLNESS (HEURISTICS)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 99; then
+print_header "99. ANNOTATIONS & NULLNESS (HEURISTICS)"
+print_category "Detects: @Nullable without guard (approx), @Deprecated usages" \
+  "Annotation-driven contracts must be respected"
+
+print_subheader "@Nullable parameters used without null guard (approx)"
+nullable_params=$("${GREP_RN[@]}" -e "@Nullable" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$nullable_params" -gt 0 ]; then print_finding "info" "$nullable_params" "@Nullable present - ensure null checks at use sites"; fi
+
+print_subheader "Usage of @Deprecated APIs"
+deprecated_use=$("${GREP_RN[@]}" -e "@Deprecated|@deprecated" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+if [ "$deprecated_use" -gt 0 ]; then print_finding "info" "$deprecated_use" "Deprecated annotations present - verify migration plans"; fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CATEGORY 100: AST-GREP RULE PACK FINDINGS (JSON/SARIF passthrough)
+# ═══════════════════════════════════════════════════════════════════════════
+if should_run 100; then
+print_header "100. AST-GREP RULE PACK FINDINGS"
+if [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_RULE_DIR" ]]; then
+  run_ast_rules || true
+  say "${DIM}${INFO} Above JSON/SARIF lines are ast-grep matches (id, message, severity, file/pos).${RESET}"
+  if [[ "$FORMAT" == "sarif" ]]; then
+    say "${DIM}${INFO} Tip: ${BOLD}${AST_GREP_CMD[*]} scan -r $AST_RULE_DIR \"$PROJECT_DIR\" --sarif > report.sarif${RESET}"
+  fi
+else
+  say "${YELLOW}${WARN} ast-grep scan subcommand unavailable; rule-pack mode skipped.${RESET}"
+fi
+fi
 
 # ═══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY

@@ -618,6 +618,23 @@ import json, sys
 from collections import OrderedDict
 path = sys.argv[1]
 stats = OrderedDict()
+file_cache = {}
+
+def check_suppression(fpath, line_no):
+    if not fpath or line_no <= 0: return False
+    if fpath not in file_cache:
+        try:
+            with open(fpath, 'r', encoding='utf-8', errors='ignore') as src:
+                file_cache[fpath] = src.readlines()
+        except Exception:
+            file_cache[fpath] = []
+    
+    lines = file_cache[fpath]
+    idx = line_no - 1
+    if 0 <= idx < len(lines) and 'ubs:ignore' in lines[idx]: return True
+    if 0 <= idx - 1 < len(lines) and 'ubs:ignore' in lines[idx-1]: return True
+    return False
+
 with open(path, 'r', encoding='utf-8') as fh:
     for line in fh:
         line = line.strip()
@@ -637,6 +654,9 @@ with open(path, 'r', encoding='utf-8') as fh:
             line0 = start.get('line', 0)
         line_no = int(line0) + 1
         file_path = obj.get('file', '?')
+
+        if check_suppression(file_path, line_no): continue
+
         entry = stats.setdefault(rid, {'count': 0, 'samples': []})
         entry['count'] += 1
         if len(entry['samples']) < 3:
@@ -799,6 +819,8 @@ def analyze_file(path, issues):
     assignments = parse_assignments(lines)
     tainted = record_taint(assignments)
     for idx, raw in enumerate(lines, start=1):
+        if 'ubs:ignore' in raw: continue
+        if idx > 1 and 'ubs:ignore' in lines[idx-2]: continue
         stripped = strip_comments(raw)
         if not stripped: continue
         for regex, rule, label in SINKS:
@@ -1615,6 +1637,23 @@ PY
 import json, sys, collections
 path, limit = sys.argv[1], int(sys.argv[2])
 buckets = collections.OrderedDict()
+file_cache = {}
+
+def check_suppression(fpath, line_no):
+    if not fpath or line_no <= 0: return False
+    if fpath not in file_cache:
+        try:
+            with open(fpath, 'r', encoding='utf-8', errors='ignore') as src:
+                file_cache[fpath] = src.readlines()
+        except Exception:
+            file_cache[fpath] = []
+    
+    lines = file_cache[fpath]
+    idx = line_no - 1
+    if 0 <= idx < len(lines) and 'ubs:ignore' in lines[idx]: return True
+    if 0 <= idx - 1 < len(lines) and 'ubs:ignore' in lines[idx-1]: return True
+    return False
+
 def add(obj):
     rid = obj.get('ruleId') or obj.get('rule_id') or obj.get('id') or 'unknown'
     sev_raw = (obj.get('severity') or '').lower().strip()
@@ -1634,6 +1673,9 @@ def add(obj):
     if ln0 is None:
         ln0 = start.get('line', 0)
     ln = int(ln0) + 1
+
+    if file != '?' and check_suppression(file, ln): return
+
     msg = obj.get('message') or rid
     b = buckets.setdefault(rid, {'severity': sev, 'message': msg, 'count': 0, 'samples': []})
     b['count'] += 1

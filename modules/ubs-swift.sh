@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 # SWIFT ULTIMATE BUG SCANNER v1.8.0 (Bash) - Industrial-Grade Code Analysis
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 # Comprehensive static analysis for modern Swift (6.2+) for iOS & macOS using:
 # • ast-grep (rule packs; language: swift)
 # • precise Info.plist ATS parsing via plistlib (when Python 3 available)
@@ -47,7 +47,7 @@
 # CI-friendly timestamps, robust find, safe pipelines, auto parallel jobs.
 # Heavily leverages ast-grep for Swift via rule packs; complements with rg.
 # Adds portable timeout resolution (timeout/gtimeout) and UTF‑8-safe output.
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 
 set -Eeuo pipefail
 shopt -s lastpipe || true
@@ -76,7 +76,7 @@ trap cleanup EXIT
 mktemp_dir(){
  local prefix="${1:-ubs_tmp}"
  local tmp="${TMPDIR:-/tmp}"
- mktemp -d "${tmp%/}/${prefix}.XXXXXXXX" 2>/dev/null || mktemp -d -t "${prefix}.XXXXXXXX" 2>/dev/null || mktemp -d
+ mktemp -d "${tmp%/}/${prefix}.XXXXXXXX" 2>/dev/null || mktemp -d -t "${prefix}.XXXXXXXX" 2>/dev/null || mktemp
 }
 mktemp_file(){
  local prefix="${1:-ubs_tmp}"
@@ -596,7 +596,7 @@ show_detailed_finding(){
  local limit=${2:-$DETAIL_LIMIT}
  local printed=0
  [[ "$DETAILED_EMITTED" -ge "$MAX_DETAILED" ]] && return 0
- while IFS=: read -r file line code; do
+ while IFS= read -r file line code; do
   print_code_sample "$file" "$line" "$code"
   printed=$((printed + 1))
   [[ $printed -ge $limit || "$DETAILED_EMITTED" -ge "$MAX_DETAILED" ]] && break
@@ -709,818 +709,36 @@ with open(stream,'r',encoding='utf-8',errors='ignore') as fh:
   msg=(o.get('message') or '')
   code=first_line(o.get('lines') or '')
   idx[file].append({'rid':rid,'row':row,'col':col,'severity':sev,'message':msg,'code':code})
-print(json.dumps(idx, ensure_ascii=False))
-PY
- [[ -s "$AG_FILE_INDEX_FILE" ]] && AG_FILE_INDEX_READY=1 || AG_FILE_INDEX_READY=0
- return 0
-}
-
-write_ast_rules(){
-  [[ "$HAS_AST_GREP" -eq 1 ]] || return 0
- AST_RULE_DIR="$(mktemp_dir swift_ag_rules)"
- cleanup_add "$AST_RULE_DIR"
-
- # CATEGORY 01 — Optionals / Force Ops
- cat >"$AST_RULE_DIR/c01-force-unwrap.yml" <<'YAML'
-id: swift.force-unwrap
-language: swift
-rule:
-  pattern: $X!
-severity: warning
-message: "Force unwrap; prefer optional binding (if let/guard let)."
-YAML
-
- cat >"$AST_RULE_DIR/c01-try-bang.yml" <<'YAML'
-id: swift.try-bang
-language: swift
-rule:
-  pattern: try! $X
-severity: error
-message: "try! will crash on error; use try? or do/catch."
-YAML
-
- cat >"$AST_RULE_DIR/c01-force-cast.yml" <<'YAML'
-id: swift.force-cast
-language: swift
-rule:
-  pattern: $X as! $T
-severity: warning
-message: "Force cast as! may crash at runtime; use as? with guard."
-YAML
-
- cat >"$AST_RULE_DIR/c01-iuo-decl.yml" <<'YAML'
-id: swift.implicitly-unwrapped
-language: swift
-rule:
-  regex: "(:|->)\\s*[A-Za-z_][A-Za-z0-9_<>?:\\.\\[\\] ]*!\\b"
-severity: warning
-message: "Implicitly unwrapped optional; prefer regular optional and safe binding."
-YAML
-
- cat >"$AST_RULE_DIR/c01-url-string-bang.yml" <<'YAML'
-id: swift.url.string.bang
-language: swift
-rule:
-  regex: "URL\\(string:\\s*[^\\)]*\\)!\\b"
-severity: warning
-message: "URL(string:) force-unwrapped; validate URL and handle nil."
-YAML
-
- cat >"$AST_RULE_DIR/c01-iboutlet-iuo.yml" <<'YAML'
-id: swift.iboutlet.iuo
-language: swift
-rule:
-  regex: "@IBOutlet\\s+weak\\s+var\\s+[A-Za-z_][A-Za-z0-9_]*\\s*:\\s*[^!\\n]*!\\b"
-severity: info
-message: "@IBOutlet implicitly unwrapped; ensure safe lifecycle assumptions."
-YAML
-
- # CATEGORY 02 — Concurrency / Task
- cat >"$AST_RULE_DIR/c02-task-launch.yml" <<'YAML'
-id: swift.task.floating
-language: swift
-rule:
-  regex: "\\bTask\\s*\\{"
-severity: warning
-message: "Task { ... } launched; review cancellation and lifetime."
-YAML
-
- cat >"$AST_RULE_DIR/c02-task-detached.yml" <<'YAML'
-id: swift.task.detached-no-handle
-language: swift
-rule:
-  regex: "\\bTask\\.detached\\b"
-severity: warning
-message: "Task.detached used; detached tasks often outlive scope—review cancellation/lifetime."
-YAML
-
- cat >"$AST_RULE_DIR/c02-continuation-no-resume.yml" <<'YAML'
-id: swift.continuation.no-resume
-language: swift
-rule:
-  regex: "with(Checked|Unsafe)(Throwing)?Continuation\\s*\\{[\\s\\S]*\\}"
-  not:
-    regex: "\\bresume\\s*\\("
-severity: error
-message: "Continuation body has no resume(); verify every path resumes exactly once."
-YAML
-
- cat >"$AST_RULE_DIR/c02-task-sleep-units.yml" <<'YAML'
-id: swift.task.sleep.units
-language: swift
-rule:
-  regex: "\\bTask\\.sleep\\s*\\(\\s*[0-9_]+\\s*\\)"
-severity: warning
-message: "Task.sleep expects nanoseconds; small literals often indicate seconds confusion."
-YAML
-
- cat >"$AST_RULE_DIR/c02-main-sync.yml" <<'YAML'
-id: swift.dispatch.main.sync
-language: swift
-rule:
-  regex: "DispatchQueue\\.main\\.sync\\s*\\{"
-severity: warning
-message: "DispatchQueue.main.sync risks deadlock; prefer async or @MainActor."
-YAML
-
- cat >"$AST_RULE_DIR/c02-dispatchgroup-enter.yml" <<'YAML'
-id: swift.dispatchgroup.enter-leave.maybe-imbalance
-language: swift
-rule:
-  regex: "\\.enter\\s*\\(\\s*\\)"
-severity: info
-message: "DispatchGroup enter() used; verify balanced leave() on all paths."
-YAML
-
- cat >"$AST_RULE_DIR/c02-async-let.yml" <<'YAML'
-id: swift.async-let.used
-language: swift
-rule:
-  regex: "\\basync\\s+let\\b"
-severity: info
-message: "async let used; verify every async-let value is awaited/consumed."
-YAML
-
- cat >"$AST_RULE_DIR/c02-unchecked-sendable.yml" <<'YAML'
-id: swift.unchecked.sendable
-language: swift
-rule:
-  regex: "@unchecked\\s+Sendable"
-severity: warning
-message: "@unchecked Sendable used; review for data races and actor isolation violations."
-YAML
-
- cat >"$AST_RULE_DIR/c02-nonisolated-unsafe.yml" <<'YAML'
-id: swift.nonisolated.unsafe
-language: swift
-rule:
-  regex: "nonisolated\\s*\\(\\s*unsafe\\s*\\)"
-severity: warning
-message: "nonisolated(unsafe) used; review for concurrency correctness and thread-safety."
-YAML
-
- # CATEGORY 03 — Closures / Captures
- cat >"$AST_RULE_DIR/c03-unowned-self.yml" <<'YAML'
-id: swift.closure.unowned-self-escaping
-language: swift
-rule:
-  regex: "\\[\\s*unowned\\s+self\\s*\\]"
-severity: warning
-message: "Escaping closure capturing unowned self may crash; prefer [weak self] + guard."
-YAML
-
- cat >"$AST_RULE_DIR/c03-weak-self-guard.yml" <<'YAML'
-id: swift.closure.weak-self.guarded
-language: swift
-rule:
-  regex: "\\[[^\\]]*weak\\s+self[^\\]]*\\]"
-severity: info
-message: "weak self captured; ensure self is safely unwrapped (guard let self = self)."
-YAML
-
- cat >"$AST_RULE_DIR/c03-strong-self.yml" <<'YAML'
-id: swift.closure.capture-strong-self
-language: swift
-rule:
-  regex: "\\{[\\s\\S]{0,250}\\bself\\."
-severity: info
-message: "Closure references self; for long-lived work consider [weak self] to avoid cycles."
-YAML
-
- # CATEGORY 04 — URLSession / Networking
- cat >"$AST_RULE_DIR/c04-data-contents-of.yml" <<'YAML'
-id: swift.data-contents-of
-language: swift
-rule:
-  pattern: Data(contentsOf: $X)
-severity: warning
-message: "Data(contentsOf:) is blocking; avoid for remote URLs and large files."
-YAML
-
- cat >"$AST_RULE_DIR/c04-http-literal.yml" <<'YAML'
-id: swift.http-literal
-language: swift
-rule:
-  regex: "\"http://[^\"]+\""
-severity: warning
-message: "http:// literal detected; prefer https and ATS-compliant networking."
-YAML
-
- cat >"$AST_RULE_DIR/c04-url-http.yml" <<'YAML'
-id: swift.url.http-literal
-language: swift
-rule:
-  regex: "URL\\(string:\\s*\"http://[^\"]*\"\\)"
-severity: warning
-message: "URL(string:) with http:// literal; prefer https unless ATS exception is justified."
-YAML
-
- cat >"$AST_RULE_DIR/c04-urlsession-task-no-resume.yml" <<'YAML'
-id: swift.urlsession.task-no-resume
-language: swift
-rule:
-  regex: "\\.(dataTask|uploadTask|downloadTask)\\s*\\("
-severity: info
-message: "URLSession task created (correlation will check resume/cancel); ensure lifecycle management."
-YAML
-
- cat >"$AST_RULE_DIR/c04-urlsession-trust.yml" <<'YAML'
-id: swift.urlsession.delegate.tls-trust
-language: swift
-rule:
-  regex: "didReceiveChallenge\\s*\\(.*URLAuthenticationChallenge.*\\)[\\s\\S]*?completionHandler\\s*\\(\\s*\\.useCredential\\s*,\\s*URLCredential\\(trust:"
-severity: error
-message: "URLSession delegate trusts server trust directly; TLS pinning bypass risk."
-YAML
-
- cat >"$AST_RULE_DIR/c04-urlcomponents-manual.yml" <<'YAML'
-id: swift.urlcomponents.manual-string
-language: swift
-rule:
-  any:
-    - regex: "URL\\(string:\\s*\"https?://[^\"\\?]+\\?[^\"\\)]*\"\\s*\\)"
-    - regex: "\"[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]+\\?([A-Za-z0-9_%-]+=[A-Za-z0-9_%-]+&?)+\""
-severity: info
-message: "Query strings built manually; prefer URLComponents to avoid encoding bugs."
-YAML
-
- # CATEGORY 05 — Error Handling
- cat >"$AST_RULE_DIR/c05-empty-catch.yml" <<'YAML'
-id: swift.error.empty-catch
-language: swift
-rule:
-  regex: "\\bcatch\\s*\\{\\s*\\}"
-severity: warning
-message: "Empty catch block; handle or propagate error."
-YAML
-
- cat >"$AST_RULE_DIR/c05-json-try-bang.yml" <<'YAML'
-id: swift.json.decode.try-bang
-language: swift
-rule:
-  any:
-    - regex: "try!\\s*JSONDecoder\\s*\\(\\s*\\)\\s*\\.decode\\s*\\("
-    - regex: "try!\\s*[A-Za-z_][A-Za-z0-9_]*\\s*\\.decode\\s*\\("
-severity: error
-message: "JSON decode with try! may crash; use do/catch and surface decoding errors."
-YAML
-
- cat >"$AST_RULE_DIR/c05-json-try-q.yml" <<'YAML'
-id: swift.json.decode.try-question
-language: swift
-rule:
-  any:
-    - regex: "try\\?\\s*JSONDecoder\\s*\\(\\s*\\)\\s*\\.decode\\s*\\("
-    - regex: "try\\?\\s*[A-Za-z_][A-Za-z0-9_]*\\s*\\.decode\\s*\\("
-severity: info
-message: "Decoding with try? discards errors; ensure this is intentional and logged."
-YAML
-
- cat >"$AST_RULE_DIR/c05-fatal-precondition.yml" <<'YAML'
-id: swift.fatal-or-precondition
-language: swift
-rule:
-  any:
-    - regex: "\\bfatalError\\s*\\("
-    - regex: "\\bpreconditionFailure\\s*\\("
-severity: warning
-message: "Crash calls present; confirm they are not reachable in production."
-YAML
-
- cat >"$AST_RULE_DIR/c05-nil-coalesce-fatal.yml" <<'YAML'
-id: swift.nil-coalescing-fatal
-language: swift
-rule:
-  regex: "\\?\\?\\s*fatalError\\s*\\("
-severity: warning
-message: "Using ?? fatalError for control flow; prefer throwing or early returns."
-YAML
-
- # CATEGORY 06 — Security
- cat >"$AST_RULE_DIR/c06-hardcoded-secrets.yml" <<'YAML'
-id: swift.hardcoded.secret
-language: swift
-rule:
-  regex: "(?i)(password|api_?key|secret|token)[[:space:]]*[:=][[:space:]]*\\\"[^\\\"]+\\\""
-severity: error
-message: "Hardcoded secret lookalike in source; rotate secrets and load from secure storage."
-YAML
-
- cat >"$AST_RULE_DIR/c06-userdefaults-secrets.yml" <<'YAML'
-id: swift.userdefaults.secrets
-language: swift
-rule:
-  regex: "(?i)UserDefaults\\.[A-Za-z_]+\\.set\\s*\\([^)]*(password|token|secret|apikey|api_key|authorization|bearer)[^)]*\\)"
-severity: warning
-message: "Sensitive-looking value stored in UserDefaults; prefer Keychain."
-YAML
-
- cat >"$AST_RULE_DIR/c06-process-shell.yml" <<'YAML'
-id: swift.process.shell-injection
-language: swift
-rule:
-  regex: "\\b(Process\\s*\\(|system\\s*\\(|posix_spawn\\s*\\()"
-severity: info
-message: "Process/system invocation present; ensure untrusted input is sanitized."
-YAML
-
- cat >"$AST_RULE_DIR/c06-process-suspicious-args.yml" <<'YAML'
-id: swift.process.suspicious-args
-language: swift
-rule:
-  regex: "Process\\s*\\(\\s*[^)]*arguments:\\s*\\[[^\\]]*(;|\\|\\||\\|\\s*grep|\\|\\s*sh)[^\\]]*\\]"
-severity: warning
-message: "Process arguments contain a shell pipeline; avoid shell invocation via arguments."
-YAML
-
- cat >"$AST_RULE_DIR/c06-nskeyedunarchiver-insecure.yml" <<'YAML'
-id: swift.nskeyedunarchiver.insecure
-language: swift
-rule:
-  any:
-    - regex: "\\bNSKeyedUnarchiver\\.unarchiveObject\\(with:"
-    - regex: "\\bunarchiveTopLevelObjectWithData\\s*\\("
-severity: warning
-message: "Potentially unsafe unarchiving; ensure secure coding and trusted data."
-YAML
-
- cat >"$AST_RULE_DIR/c06-nskeyedarchiver-insecurecoding.yml" <<'YAML'
-id: swift.nskeyedarchiver.securecoding.false
-language: swift
-rule:
-  regex: "requiresSecureCoding\\s*:\\s*false"
-severity: warning
-message: "requiresSecureCoding: false weakens deserialization safety; prefer true + NSSecureCoding."
-YAML
-
- cat >"$AST_RULE_DIR/c06-keychain-accessible-always.yml" <<'YAML'
-id: swift.keychain.accessible.always
-language: swift
-rule:
-  regex: "kSecAttrAccessibleAlways"
-severity: warning
-message: "Keychain kSecAttrAccessibleAlways used; prefer more restrictive accessibility."
-YAML
-
- cat >"$AST_RULE_DIR/c06-fileprotection-none.yml" <<'YAML'
-id: swift.fileprotection.none
-language: swift
-rule:
-  regex: "FileProtectionType\\.none"
-severity: warning
-message: "FileProtectionType.none used; consider stronger file protection."
-YAML
-
- cat >"$AST_RULE_DIR/c06-unsafe-bitcast.yml" <<'YAML'
-id: swift.unsafe.bitcast
-language: swift
-rule:
-  regex: "\\bunsafeBitCast\\s*\\("
-severity: warning
-message: "unsafeBitCast used; review memory safety and type invariants."
-YAML
-
- cat >"$AST_RULE_DIR/c06-unsafe-pointer.yml" <<'YAML'
-id: swift.unsafe.pointer
-language: swift
-rule:
-  regex: "\\bUnsafe(Raw)?(Mutable)?Pointer\\b"
-severity: info
-message: "Unsafe pointer usage; review for memory safety and lifetime rules."
-YAML
-
- # CATEGORY 07 — Crypto / Hashing
- cat >"$AST_RULE_DIR/c07-commoncrypto-weak.yml" <<'YAML'
-id: swift.commoncrypto.weak
-language: swift
-rule:
-  any:
-    - regex: "\\bCC_MD5\\b"
-    - regex: "\\bCC_SHA1\\b"
-severity: warning
-message: "Weak hash algorithm (MD5/SHA1) via CommonCrypto."
-YAML
-
- cat >"$AST_RULE_DIR/c07-cryptokit-insecure.yml" <<'YAML'
-id: swift.cryptokit.insecure
-language: swift
-rule:
-  any:
-    - regex: "\\bInsecure\\.SHA1\\b"
-    - regex: "\\bInsecure\\.MD5\\b"
-severity: warning
-message: "CryptoKit Insecure.* algorithm used; prefer SHA256/512."
-YAML
-
- cat >"$AST_RULE_DIR/c07-ecb.yml" <<'YAML'
-id: swift.commoncrypto.ecb
-language: swift
-rule:
-  regex: "\\bkCCOptionECBMode\\b"
-severity: warning
-message: "ECB mode detected; use authenticated encryption modes instead."
-YAML
-
- cat >"$AST_RULE_DIR/c07-insecure-rand.yml" <<'YAML'
-id: swift.crypto.insecure.rand
-language: swift
-rule:
-  regex: "\\brand\\s*\\("
-severity: warning
-message: "rand() is not cryptographically secure; prefer SecRandomCopyBytes/CryptoKit."
-YAML
-
- # CATEGORY 08 — Files & I/O
- cat >"$AST_RULE_DIR/c08-filehandle-open.yml" <<'YAML'
-id: swift.filehandle.open
-language: swift
-rule:
-  regex: "\\bFileHandle\\s*\\(\\s*for(Reading|Writing|Updating)(From|To|AtPath)\\s*:"
-severity: info
-message: "FileHandle opened; ensure close() in defer and handle errors."
-YAML
-
- cat >"$AST_RULE_DIR/c08-string-contents-of.yml" <<'YAML'
-id: swift.string.contents-of
-language: swift
-rule:
-  regex: "\\bString\\s*\\(\\s*contentsOf:\\s*"
-severity: warning
-message: "String(contentsOf:) can block; avoid on main thread and validate encoding/size."
-YAML
-
- cat >"$AST_RULE_DIR/c08-path-join-string.yml" <<'YAML'
-id: swift.path.join.string-plus
-language: swift
-rule:
-  regex: "\"/\"\\s*\\+\\s*[A-Za-z_][A-Za-z0-9_]*"
-severity: info
-message: "Path building via string concatenation; prefer URL.appendingPathComponent."
-YAML
-
- cat >"$AST_RULE_DIR/c08-try-removeitem-question.yml" <<'YAML'
-id: swift.filemanager.remove.try-question
-language: swift
-rule:
-  regex: "try\\?\\s*FileManager\\.[A-Za-z_]+\\.removeItem\\s*\\("
-severity: info
-message: "try? removeItem discards errors; ensure you log/handle failures."
-YAML
-
- # CATEGORY 09 — Threading / Main
- cat >"$AST_RULE_DIR/c09-main-thread-sleep.yml" <<'YAML'
-id: swift.main-thread.sleep
-language: swift
-rule:
-  regex: "DispatchQueue\\.main\\.(async|sync)\\s*\\{[\\s\\S]{0,250}\\b(u?sleep)\\s*\\("
-severity: warning
-message: "Blocking sleep on main queue."
-YAML
-
- # CATEGORY 10 — Performance
- cat >"$AST_RULE_DIR/c10-dateformatter-loop.yml" <<'YAML'
-id: swift.dateformatter.in-loop
-language: swift
-rule:
-  regex: "for[\\s\\S]{0,150}DateFormatter\\s*\\(\\s*\\)"
-severity: info
-message: "DateFormatter constructed near a loop; cache formatters for performance."
-YAML
-
- cat >"$AST_RULE_DIR/c10-numberformatter-loop.yml" <<'YAML'
-id: swift.numberformatter.in-loop
-language: swift
-rule:
-  regex: "for[\\s\\S]{0,150}NumberFormatter\\s*\\(\\s*\\)"
-severity: info
-message: "NumberFormatter constructed near a loop; cache formatters for performance."
-YAML
-
- cat >"$AST_RULE_DIR/c10-jsondecoder-loop.yml" <<'YAML'
-id: swift.jsondecoder.in-loop
-language: swift
-rule:
-  regex: "for[\\s\\S]{0,150}JSONDecoder\\s*\\(\\s*\\)"
-severity: info
-message: "JSONDecoder constructed near a loop; reuse decoders to reduce allocations."
-YAML
-
- # CATEGORY 11 — Debug / Production
- cat >"$AST_RULE_DIR/c11-print-nslog.yml" <<'YAML'
-id: swift.print.nslog
-language: swift
-rule:
-  any:
-    - regex: "^[^\\S\\n]*print\\s*\\("
-    - regex: "\\bNSLog\\s*\\("
-severity: info
-message: "Print/NSLog found; ensure debug-only or use os.Logger with privacy."
-YAML
-
- cat >"$AST_RULE_DIR/c11-debug-only.yml" <<'YAML'
-id: swift.debug.only.code
-language: swift
-rule:
-  regex: "#if\\s+DEBUG"
-severity: info
-message: "#if DEBUG blocks present; ensure release behavior is correct."
-YAML
-
- cat >"$AST_RULE_DIR/c11-oslogger-privacy.yml" <<'YAML'
-id: swift.oslogger.privacy
-language: swift
-rule:
-  regex: "\\blogger\\.[a-zA-Z]+\\([^\\)]*\\(\\s*[^\\)]*\\)[^\\)]*\\)"
-  not:
-    regex: "privacy:\\s*\\.(private|public)"
-severity: info
-message: "os.Logger interpolation without explicit privacy; be explicit."
-YAML
-
- # CATEGORY 12 — Regex
- cat >"$AST_RULE_DIR/c12-regex-nested.yml" <<'YAML'
-id: swift.regex.nested-quantifiers
-language: swift
-rule:
-  regex: "NSRegularExpression\\(pattern:[^\\n\\)]*(\\+\\+|\\*\\+|\\+\\*|\\*\\*)"
-severity: warning
-message: "Potential catastrophic backtracking (nested quantifiers) in regex."
-YAML
-
- cat >"$AST_RULE_DIR/c12-nspredicate-format.yml" <<'YAML'
-id: swift.nspredicate.format
-language: swift
-rule:
-  regex: "\\bNSPredicate\\s*\\(\\s*format:\\s*\\\""
-severity: info
-message: "NSPredicate(format:) uses format strings; validate against injection and type issues."
-YAML
-
- # CATEGORY 13 — SwiftUI / Combine
- cat >"$AST_RULE_DIR/c13-combine-sink.yml" <<'YAML'
-id: swift.combine.sink-no-store
-language: swift
-rule:
-  regex: "\\.sink\\s*\\("
-severity: warning
-message: "Combine sink used; ensure AnyCancellable is retained (store(in:))."
-YAML
-
- cat >"$AST_RULE_DIR/c13-swiftui-onreceive.yml" <<'YAML'
-id: swift.swiftui.onreceive
-language: swift
-rule:
-  regex: "\\.onReceive\\s*\\("
-severity: info
-message: "SwiftUI .onReceive used; ensure captures do not create cycles."
-YAML
-
- cat >"$AST_RULE_DIR/c13-uiimage-named.yml" <<'YAML'
-id: swift.uiimage.named
-language: swift
-rule:
-  any:
-    - regex: "\\bUIImage\\s*\\(\\s*named:"
-    - regex: "\\bNSImage\\s*\\(\\s*named:"
-severity: info
-message: "Image by name; ensure caching/asset catalog usage to avoid repeated loads."
-YAML
-
- # CATEGORY 14 — Memory / Retain
- cat >"$AST_RULE_DIR/c14-timer.yml" <<'YAML'
-id: swift.timer.scheduled
-language: swift
-rule:
-  regex: "\\bTimer\\.scheduledTimer\\b"
-severity: warning
-message: "Timer.scheduledTimer used; ensure it is invalidated and does not strongly capture self."
-YAML
-
- cat >"$AST_RULE_DIR/c14-notification-block.yml" <<'YAML'
-id: swift.notification.addobserver.block
-language: swift
-rule:
-  regex: "NotificationCenter\\.default\\.addObserver\\([^\\)]*forName:"
-severity: warning
-message: "Block-based NotificationCenter observer; ensure token stored and removed."
-YAML
-
- cat >"$AST_RULE_DIR/c14-cadisplaylink.yml" <<'YAML'
-id: swift.cadisplaylink.created
-language: swift
-rule:
-  regex: "\\bCADisplayLink\\s*\\("
-severity: warning
-message: "CADisplayLink created; ensure invalidate() on teardown."
-YAML
-
- # CATEGORY 18 — Deprecated APIs
- cat >"$AST_RULE_DIR/c18-nsurlconnection.yml" <<'YAML'
-id: swift.deprecated.nsurlconnection
-language: swift
-rule:
-  any:
-    - regex: "\\bNSURLConnection\\b"
-    - regex: "NSURLConnection\\.sendSynchronousRequest\\s*\\("
-severity: info
-message: "NSURLConnection deprecated; use URLSession."
-YAML
-
- cat >"$AST_RULE_DIR/c18-uiwebview.yml" <<'YAML'
-id: swift.deprecated.uiwebview
-language: swift
-rule:
-  regex: "\\bUIWebView\\b"
-severity: warning
-message: "UIWebView is deprecated and banned on App Store; use WKWebView."
-YAML
-
- cat >"$AST_RULE_DIR/c18-userdefaults-sync.yml" <<'YAML'
-id: swift.deprecated.userdefaults.synchronize
-language: swift
-rule:
-  regex: "\\bUserDefaults\\.[A-Za-z_]+\\.synchronize\\s*\\("
-severity: info
-message: "UserDefaults.synchronize() is deprecated; remove and rely on system syncing."
-YAML
-
- cat >"$AST_RULE_DIR/c18-uiapp-keywindow.yml" <<'YAML'
-id: swift.deprecated.uiapplication.keywindow
-language: swift
-rule:
-  regex: "\\bUIApplication\\.shared\\.keyWindow\\b"
-severity: info
-message: "UIApplication.shared.keyWindow is deprecated; use windows/scenes APIs."
-YAML
-
- cat >"$AST_RULE_DIR/c18-statusbar.yml" <<'YAML'
-id: swift.deprecated.statusbar
-language: swift
-rule:
-  regex: "statusBarFrame|setStatusBarHidden"
-severity: info
-message: "Deprecated status bar API usage; migrate to modern APIs."
-YAML
-
- # Misc existing rule IDs preserved (compat / reference)
- cat >"$AST_RULE_DIR/c04-timer-not-invalidated.yml" <<'YAML'
-id: swift.timer.not-invalidated
-language: swift
-rule:
-  regex: "Timer\\.scheduledTimer"
-severity: warning
-message: "Timer scheduled; ensure timer.invalidate() occurs (heuristic)."
-YAML
-
- cat >"$AST_RULE_DIR/c14-notification-token-not-removed.yml" <<'YAML'
-id: swift.notification.token-not-removed
-language: swift
-rule:
-  regex: "NotificationCenter\\.default\\.addObserver\\("
-severity: warning
-message: "NotificationCenter observer added; ensure removal/token lifecycle (heuristic)."
-YAML
-
- cat >"$AST_RULE_DIR/c13-combine-sink-no-store-compat.yml" <<'YAML'
-id: swift.combine.sink-no-store.compat
-language: swift
-rule:
-  regex: "\\.sink\\s*\\("
-severity: info
-message: "Combine sink detected (compat rule); retention must be ensured."
-YAML
-
- cat >"$AST_RULE_DIR/c06-hardcoded-bearer.yml" <<'YAML'
-id: swift.http.header.bearer-literal
-language: swift
-rule:
-  regex: "(?i)Authorization\\\"?\\s*:\\s*\\\"?Bearer\\s+[A-Za-z0-9\\._\\-]+\\\"?"
-severity: warning
-message: "Hardcoded Bearer token-like Authorization header."
-YAML
-
- cat >"$AST_RULE_DIR/c06-userdefaults-boolean-security.yml" <<'YAML'
-id: swift.userdefaults.boolean-security
-language: swift
-rule:
-  regex: "UserDefaults\\.(standard|shared)\\.bool\\(forKey:\\s*\"(?i)(debug|insecure|allowhttp|disableats)\"\\)"
-severity: warning
-message: "Security-toggling feature flag via UserDefaults; ensure release build locks this down."
-YAML
-
- cat >"$AST_RULE_DIR/c06-ats-flag-disable.yml" <<'YAML'
-id: swift.ats.flag.disable
-language: swift
-rule:
-  regex: "(?i)UserDefaults\\.(standard|shared)\\.(set|register)\\([^\\)]*(disableats|allowhttp|insecure)[^\\)]*\\)"
-severity: info
-message: "Security-affecting feature flag toggled via UserDefaults; ensure release build constraints."
-YAML
-
- cat >"$AST_RULE_DIR/c03-kvc-literal.yml" <<'YAML'
-id: swift.kvc.literal
-language: swift
-rule:
-  regex: "\\.setValue\\s*\\([^\\)]*,\\s*forKey:\\s*\"[A-Za-z0-9_\\.]+\"\\s*\\)"
-severity: info
-message: "KVC string key; prefer typed APIs to avoid runtime key typos."
-YAML
-
- cat >"$AST_RULE_DIR/c03-anyobject-cast.yml" <<'YAML'
-id: swift.anyobject-cast
-language: swift
-rule:
-  regex: "\\bas\\s+AnyObject\\b"
-severity: info
-message: "Casting to AnyObject erases types; avoid unless required by ObjC APIs."
-YAML
-
- cat >"$AST_RULE_DIR/c02-actor-detached.yml" <<'YAML'
-id: swift.actor.escaping-reference
-language: swift
-rule:
-  regex: "@MainActor[\\s\\S]{0,500}Task\\.detached\\s*\\{"
-severity: info
-message: "Detached task inside @MainActor context; verify actor boundary crossings."
-YAML
-
- cat >"$AST_RULE_DIR/c04-urlsession-task-no-cancel.yml" <<'YAML'
-id: swift.urlsession.task-no-cancel-on-deinit
-language: swift
-rule:
-  regex: "let\\s+[A-Za-z_][A-Za-z0-9_]*\\s*=\\s*.*\\.(dataTask|uploadTask|downloadTask)\\s*\\("
-severity: info
-message: "URLSession task captured; ensure cancel() on teardown if needed."
-YAML
-
- cat >"$AST_RULE_DIR/c10-nscache.yml" <<'YAML'
-id: swift.nscache.misuse
-language: swift
-rule:
-  regex: "NSCache<\\s*[^,>]+\\s*,\\s*[^>]+\\s*>\\s*\\("
-severity: info
-message: "Check NSCache key/value for class types and memory behaviors."
-YAML
-
- cat >"$AST_RULE_DIR/c02-dispatchsemaphore-main.yml" <<'YAML'
-id: swift.dispatchsemaphore.main
-language: swift
-rule:
-  regex: "DispatchQueue\\.main\\.[a-z]+\\s*\\{[\\s\\S]{0,250}DispatchSemaphore\\s*\\(\\s*value:\\s*[0-9]+\\s*\\)[\\s\\S]{0,250}\\.wait\\s*\\("
-severity: warning
-message: "Semaphore wait on main queue can deadlock."
-YAML
-
- cat >"$AST_RULE_DIR/c21-ibaction-iuo.yml" <<'YAML'
-id: swift.ibaction.iuo
-language: swift
-rule:
-  regex: "@IBAction\\s+func\\s+[A-Za-z_][A-Za-z0-9_]*\\s*\\([^\\)]*!\\)"
-severity: info
-message: "@IBAction with IUO parameter; prefer non-IUO where possible."
-YAML
-
- # merge user rules dir
-  if [[ -n "$USER_RULE_DIR" && -d "$USER_RULE_DIR" ]]; then
-    cp -R "$USER_RULE_DIR"/. "$AST_RULE_DIR"/ 2>/dev/null || true
-  fi
-
- build_ag_rule_index || true
-
- if [[ -n "$DUMP_RULES_DIR" ]]; then
-  mkdir -p "$DUMP_RULES_DIR" 2>/dev/null || die "Cannot create --dump-rules dir: $DUMP_RULES_DIR"
-  cp -R "$AST_RULE_DIR"/. "$DUMP_RULES_DIR"/ 2>/dev/null || die "Failed copying rules to $DUMP_RULES_DIR"
-  say "${GREEN}${CHECK} Rules written to: ${CYAN}$DUMP_RULES_DIR${RESET}"
-  exit 0
+[[ -s "$AG_FILE_INDEX_FILE" ]] && AG_FILE_INDEX_READY=1 || AG_FILE_INDEX_READY=0
+  return 0
+}$'\t' read -r tag a b c d; do
+    case "$tag" in
+    __FINDING__)
+     local sev cnt rid msg cat
+     sev="$(normalize_severity "$a")"
+     cnt="$(num_clamp "$b")"
+     rid="$c"; msg="$d"
+     cat="${AG_RULE_CATEGORY[$rid]:-0}"
+     set_category "$cat"
+     print_finding "$sev" "$cnt" "$rid: $msg"
+     ;;
+    __SAMPLE__) print_code_sample "$a" "$b" "$c" ;;
+   esac
+  done <"$tmp"
+ else
+  declare -A counts=()
+  local line rid
+  while IFS= read -r line; do
+   rid="$(printf '%s' "$line" | sed -nE 's/.*"(rule_id|rule_id)"[[:space:]]*:[[:space:]]*"([^"]+)".*/\2/p')"
+   [[ -n "$rid" ]] || continue
+   counts["$rid"]=$(( ${counts["$rid"]:-0} + 1 ))
+  done <"$AG_STREAM_FILE"
+  for rid in "${!counts[@]}"; do
+   set_category "${AG_RULE_CATEGORY[$rid]:-0}"
+   print_finding "info" "${counts[$rid]}" "$rid"
+  done
  fi
-
- if [[ -n "$EXPLAIN_RULE_ID" ]]; then
-  local f="${AG_RULE_FILE[$EXPLAIN_RULE_ID]:-}"
-  [[ -n "$f" && -f "$f" ]] || die "Rule id not found in merged rules: $EXPLAIN_RULE_ID"
-  say "${WHITE}${BOLD}Rule: ${EXPLAIN_RULE_ID}${RESET}"
-  say "${DIM}File: $f${RESET}"
-  echo ""
-  cat "$f"
-  exit 0
-  fi
-
-  if [[ "$LIST_RULES" -eq 1 ]]; then
-    say "${WHITE}${BOLD}ast-grep rules (embedded + user):${RESET}"
-    shopt -s nullglob
-  local f id sev msg base cat
-    for f in "$AST_RULE_DIR"/*.yml; do
-   id="$(awk '/^id:/{print $2; exit}' "$f" 2>/dev/null || true)"
-   sev="$(awk '/^severity:/{print $2; exit}' "$f" 2>/dev/null || true)"
-   msg="$(awk '/^message:/{sub(/^message:[ ]*/,""); print; exit}' "$f" 2>/dev/null || true)"
-   base="$(basename "$f")"
-   cat=0
-   [[ "$base" =~ ^c([0-9]{2})- ]] && cat=$((10#${BASH_REMATCH[1]}))
-   [[ -n "$id" ]] || continue
-   if [[ "$cat" -gt 0 ]]; then say " - ${id} [${sev:-info}] (cat $cat) ${msg}"; else say " - ${id} [${sev:-info}] ${msg}"; fi
-    done
-    shopt -u nullglob
-    exit 0
-  fi
+  return 0
 }
 
 run_ast_rules(){
@@ -1531,15 +749,30 @@ run_ast_rules(){
   print_subheader "ast-grep rule-pack summary"
 
   if command -v python3 >/dev/null 2>&1; then
-  local tmp_sum; tmp_sum="$(mktemp_file ubs_ag_summary)"
-  cleanup_add "$tmp_sum"
-  python3 - "$AG_STREAM_FILE" "$DETAIL_LIMIT" >"$tmp_sum" <<'PY'
-import json
-import sys
-import collections
+  local tmp; tmp="$(mktemp_file ubs_ag_summary)"
+  cleanup_add "$tmp"
+  python3 - "$AG_STREAM_FILE" "$DETAIL_LIMIT" >"$tmp" <<'PYTHON_END'
+import json, sys, collections
+import re
 
 path, limit = sys.argv[1], int(sys.argv[2])
 buckets = collections.OrderedDict()
+file_cache = {}
+
+def check_suppression(fpath, line_no):
+    if not fpath or line_no <= 0: return False
+    if fpath not in file_cache:
+        try:
+            with open(fpath, 'r', encoding='utf-8', errors='ignore') as src:
+                file_cache[fpath] = src.readlines()
+        except Exception:
+            file_cache[fpath] = []
+    
+    lines = file_cache[fpath]
+    idx = line_no - 1
+    if 0 <= idx < len(lines) and 'ubs:ignore' in lines[idx]: return True
+    if 0 <= idx - 1 < len(lines) and 'ubs:ignore' in lines[idx-1]: return True
+    return False
 
 def sev_map(s: str) -> str:
     s = (s or "").lower().strip()
@@ -1563,14 +796,17 @@ def start_line(obj: dict) -> int:
         return 1
 
 def add(obj: dict) -> None:
-    rid = obj.get("ruleId") or obj.get("rule_id") or obj.get("id") or "unknown"
+    rid = obj.get("rule_id") or obj.get("id") or "unknown"
     sev = sev_map(obj.get("severity") or obj.get("level") or "info")
     file = obj.get("file", "?")
+    line = start_line(obj)
     msg = obj.get("message") or rid
+    if check_suppression(file, line): return
     b = buckets.setdefault(rid, {"severity": sev, "message": msg, "count": 0, "samples": []})
     b["count"] += 1
     if len(b["samples"]) < limit:
         ln = start_line(obj)
+        if check_suppression(file, ln): return
         lines = (obj.get("lines") or "").strip().splitlines()
         code = (lines[0] if lines else "").strip()
         b["samples"].append((file, ln, code))
@@ -1594,8 +830,8 @@ for rid, data in sorted(
     for f, l, c in data["samples"]:
         s = (c or "").replace("\t", " ").strip()
         print(f"__SAMPLE__\t{f}\t{l}\t{s}")
-PY
-  while IFS=$'\t' read -r tag a b c d; do
+PYTHON_END
+    while IFS=$'\t' read -r tag a b c d; do
     case "$tag" in
     __FINDING__)
      local sev cnt rid msg cat
@@ -1608,12 +844,12 @@ PY
      ;;
     __SAMPLE__) print_code_sample "$a" "$b" "$c" ;;
    esac
-  done <"$tmp_sum"
+  done <"$tmp"
  else
   declare -A counts=()
   local line rid
   while IFS= read -r line; do
-   rid="$(printf '%s' "$line" | sed -nE 's/.*"(ruleId|rule_id)"[[:space:]]*:[[:space:]]*"([^"]+)".*/\2/p')"
+   rid="$(printf '%s' "$line" | sed -nE 's/.*"(rule_id|rule_id)"[[:space:]]*:[[:space:]]*"([^"]+)".*/\2/p')"
    [[ -n "$rid" ]] || continue
    counts["$rid"]=$(( ${counts["$rid"]:-0} + 1 ))
   done <"$AG_STREAM_FILE"
@@ -1776,7 +1012,7 @@ def parse_call_end(s, call_start):
   if s[i] == '{':
    end_cl = scan_balanced(s, i, '{', '}')
    if end_cl is None: return i
-   i=end_cl
+    i=end_cl
    continue
   m=re.match(r'[A-Za-z_]\w*\s*:\s*', s[i:])
   if m:
@@ -1802,20 +1038,9 @@ def chained_lifecycle(s, call_end):
  for name in ("resume","cancel"):
   if s.startswith(name, j):
    k=skip_ws(s, j+len(name))
-   if k < len(s) and s[k] == '(':
+   if s[k] == '(':
     return name
  return None
-
-def find_last_assignment_eq(seg):
- for pos in range(len(seg)-1, -1, -1):
-  if seg[pos] != '=': continue
-  prev = seg[pos-1] if pos>0 else ''
-  nxt = seg[pos+1] if pos+1 < len(seg) else ''
-  if prev=='=' or nxt=='=': continue
-  if prev in '<>!' : continue
-  if nxt == '>' : continue
-  return pos
- return -1
 
 def extract_lhs_var(lines, row, call_col):
  def extract_from_lhs(lhs):
@@ -1831,74 +1056,12 @@ def extract_lhs_var(lines, row, call_col):
  if row < 0 or row >= len(lines): return None
  line=lines[row]
  call_col=max(0, min(call_col, len(line)))
- prefix=line[:call_col]
- eq=find_last_assignment_eq(prefix)
- if eq != -1:
-  lhs=prefix[:eq]
-  return extract_from_lhs(lhs)
- if row-1 >= 0:
-  prev=lines[row-1]
-  if re.search(r'=\s*$', prev):
-   eq=find_last_assignment_eq(prev)
-   if eq != -1:
-    lhs=prev[:eq]
-    return extract_from_lhs(lhs)
- return None
-
-def build_line_offsets(lines):
- offs=[0]*(len(lines)+1)
- p=0
- for i,ln in enumerate(lines):
-  offs[i]=p
-  p+=len(ln)
- offs[len(lines)]=p
- return offs
-
-def compile_resume_patterns(var_base, property_like):
- vb=re.escape(var_base)
- if property_like:
-  assign_re=re.compile(rf'\b(?:self\s*\.\s*)?{vb}\s*=')
-  resume_re=re.compile(rf'\b(?:self\s*\.\s*)?{vb}\s*(?:\?|\!)?\s*\.\s*resume\s*\(')
-  cancel_re=re.compile(rf'\b(?:self\s*\.\s*)?{vb}\s*(?:\?|\!)?\s*\.\s*cancel\s*\(')
-  ret_re=re.compile(rf'\breturn\s+(?:self\s*\.\s*)?{vb}\b')
+ seg=line[call_col:]
+ m=TASK_CALL_RE.search(seg)
+ if m:
+  call_col=call_col+m.start()
  else:
-  assign_re=re.compile(rf'(?<!\.)\b{vb}\b\s*=')
-  resume_re=re.compile(rf'(?<!\.)\b{vb}\b\s*(?:\?|\!)?\s*\.\s*resume\s*\(')
-  cancel_re=re.compile(rf'(?<!\.)\b{vb}\b\s*(?:\?|\!)?\s*\.\s*cancel\s*\(')
-  ret_re=re.compile(rf'\breturn\s+{vb}\b')
- return assign_re, resume_re, cancel_re, ret_re
-
-idx=json.load(open(index_path,'r',encoding='utf-8'))
-out=collections.OrderedDict()
-
-for fkey, events in idx.items():
- cands=[e for e in events if (e.get('rid') == TASK_RID)]
- if not cands: continue
- path=norm_path(fkey)
- if not os.path.exists(path):
-  continue
- try:
-  text=open(path,'r',encoding='utf-8',errors='ignore').read()
- except:
-  continue
- lines=text.splitlines(True)
- offs=build_line_offsets(lines)
-
- seen=set()
- for e in cands:
-  try:
-   row=int(e.get('row',0)); col=int(e.get('col',0))
-  except:
-   continue
-  if row < 0 or row >= len(lines): continue
-  line=lines[row]
-  col=max(0, min(col, len(line)))
-  seg=line[col:]
-  m=TASK_CALL_RE.search(seg)
-  if m:
-   call_col=col+m.start()
-  else:
-   m=TASK_CALL_RE.search(line)
+  m=TASK_CALL_RE.search(line)
    if not m: continue
    call_col=m.start()
   if (row,call_col) in seen: continue
@@ -1968,7 +1131,7 @@ for fid, data in out.items():
 PY
 
  local any=0
- while IFS=$'\t' read -r tag a b c d e; do
+ while IFS=$'\t' read -r tag a b c d; do
   case "$tag" in
    __FINDING__)
     any=1
@@ -1985,7 +1148,7 @@ PY
   esac
  done <"$tmp"
 
- [[ "$any" -eq 0 ]] && print_finding "good" "No URLSession tasks appear to be missing resume()/cancel() in-file"
+ [[ "$any" -eq 0 ]] && print_finding "good" "All URLSession tasks appear to be missing resume()/cancel() in-file"
  return 0
 }
 
@@ -2008,13 +1171,13 @@ run_resource_lifecycle_checks(){
           print_finding "$severity" 1 "$summary [$location]" "$detail"
         done <<<"$output"
       fi
-   return 0
+      return 0
     else
       print_finding "info" 0 "AST helper failed" "See stderr for details"
     fi
- fi
+  fi
 
-    if command -v python3 >/dev/null 2>&1; then
+  if command -v python3 >/dev/null 2>&1; then
   local tmp_py; tmp_py="$(mktemp_file ubs_rlc_py)"
   cleanup_add "$tmp_py"
       cat >"$tmp_py" <<'PY'
@@ -2049,10 +1212,10 @@ PY
           local summary="${RESOURCE_LIFECYCLE_SUMMARY[$kind]:-Resource imbalance}"
           local remediation="${RESOURCE_LIFECYCLE_REMEDIATION[$kind]:-Ensure matching cleanup call}"
           local severity="${RESOURCE_LIFECYCLE_SEVERITY[$kind]:-warning}"
-          print_finding "$severity" 1 "$summary [$location]" "$message; $remediation"
+          print_finding "$severity" 1 "$summary [$location]" "$remediation"
         done <<<"$out"
       else
-        print_finding "good" "All tracked resource acquisitions show matching cleanup or usage"
+        print_finding "good" "All tracked resource acquisitions show matching cleanups"
       fi
   return 0
   fi
@@ -2098,7 +1261,7 @@ run_async_error_checks(){
   return 0
  fi
  if ! command -v python3 >/dev/null 2>&1; then
-  print_finding "info" 0 "python3 not available" "Install python3 for concurrency summary"
+  print_finding "info" 0 "python3 not available for concurrency summary" "Install python3 to enable concurrency summary"
   return 0
  fi
 
@@ -2172,8 +1335,11 @@ run_swift_type_narrowing_checks(){
     return 0
   fi
   local output status
+  # DEBUG trace
+  echo "DEBUG: Running swift helper on $PROJECT_DIR" >&2
   output="$(python3 "$helper" "$PROJECT_DIR" 2>&1)"
   status=$?
+  echo "DEBUG: Helper status=$status output_len=${#output}" >&2
   if [[ $status -ne 0 ]]; then
     print_finding "info" 0 "Swift type narrowing helper failed" "$output"
     return 0
@@ -2211,13 +1377,11 @@ def check(fp: Path):
     try:
         with fp.open("rb") as fh:
             pl = plistlib.load(fh)
-  except Exception:
-    return []
-
-    res = []
+    except Exception:
+        return []
     if not isinstance(pl, dict):
-  return res
-
+        return []
+    res = []
     ats = pl.get("NSAppTransportSecurity") or {}
     if not isinstance(ats, dict):
         return res
@@ -2268,7 +1432,7 @@ PY
 run_entitlements_checks(){
  print_subheader "Entitlements parsing (.entitlements)"
  if ! command -v python3 >/dev/null 2>&1; then
-  print_finding "info" 0 "python3 not available for entitlements parsing" "Install python3 to enable precise entitlement checks"
+    print_finding "info" 0 "python3 not available for entitlements parsing" "Install python3 to enable precise entitlement checks"
   return 0
  fi
     local out
@@ -2283,7 +1447,7 @@ root = Path(sys.argv[1])
 SUSPICIOUS = [
     ("get-task-allow", True, "warning", "get-task-allow enabled", "Debugging entitlement present; ensure Release builds disable this."),
     ("com.apple.security.cs.disable-library-validation", True, "warning", "Disable library validation", "Weakens Hardened Runtime; review justification."),
-    ("com.apple.security.cs.allow-jit", True, "info", "JIT allowed", "JIT increases attack surface; ensure it is required."),
+    ("com.apple.security.cs.allow-jit", True, "info", "JIT allowed", "JIT increases attack surface; ensure it is required by ObjC APIs."),
     ("com.apple.security.cs.allow-unsigned-executable-memory", True, "warning", "Unsigned executable memory", "High risk; avoid unless absolutely required."),
     ("com.apple.security.cs.allow-dyld-environment-variables", True, "warning", "DYLD env vars allowed", "High risk; avoid unless required for dev tooling."),
 ]
@@ -2317,8 +1481,8 @@ PY
         print_finding "$sev" 1 "$title [$file]" "$detail"
       done <<<"$out"
     else
-  print_finding "good" "No suspicious entitlements detected (heuristic set)"
- fi
+      print_finding "good" "No suspicious entitlements detected (heuristic set)"
+    fi
 }
 
 opt_push_counts(){
@@ -2344,7 +1508,7 @@ run_swiftlint(){
     fi
     if [[ -s "$tmp" ]] && command -v python3 >/dev/null 2>&1; then
       read -r errs warns files <<<"$(python3 - "$tmp" <<'PY'
-import json,sys
+import json, sys
 try:
   arr=json.load(open(sys.argv[1],'r',encoding='utf-8'))
 except: print("0 0 0"); sys.exit(0)
@@ -2353,15 +1517,17 @@ for it in arr:
   lvl=(it.get("severity") or "").lower()
   files.add(it.get("file") or "?")
   if lvl in ("error","serious"): e+=1
- elif lvl in ("warning",): w+=1
-print(e,w,len(files))
+  elif lvl in ("warning",): w+=1
+print(f"{e} {w} {len(files)}")
 PY
 )"
-   say " ${WHITE}Files:${RESET} ${CYAN}${files}${RESET} ${RED}errors:${RESET} ${RED}${errs}${RESET} ${YELLOW}warnings:${RESET} ${YELLOW}${warns}${RESET}"
+      if [[ "$warns" -gt 0 || "$errs" -gt 0 ]]; then
+   say " ${YELLOW}${WARN} SwiftLint suggestions:${RESET} ${WHITE}errors=${errs} warnings=${warns}${RESET}"
       opt_push_counts warning "$((warns))"
       opt_push_counts critical "$((errs))"
     else
-   say " ${GRAY}${INFO} No SwiftLint issues or non-JSON output${RESET}"
+   say " ${GREEN}${CHECK} No SwiftLint findings${RESET}"
+    fi
     fi
   else
   say " ${GRAY}${INFO} SwiftLint not installed${RESET}"
@@ -2508,7 +1674,7 @@ if [[ "$HAS_RIPGREP" -eq 1 ]]; then
    | wc -l | awk '{print $1+0}'
  )
  SWIFT_FILE_COUNT=$(
-  ( rg --files "$PROJECT_DIR" --hidden "${RG_EXTRA_FLAGS[@]}" "${RG_EXCLUDES[@]}" "${RG_MAX_SIZE_FLAGS[@]}" -g '*.swift' 2>/dev/null || true ) \
+  ( rg --files "$PROJECT_DIR" --hidden "${RG_EXTRA_FLAGS[@]}" "${RG_MAX_SIZE_FLAGS[@]}" -g '*.swift' 2>/dev/null || true ) \
     | wc -l | awk '{print $1+0}'
   )
 else
@@ -2522,6 +1688,7 @@ else
   )
 fi
 [[ "$SWIFT_FILE_COUNT" -gt 0 ]] && HAS_SWIFT_FILES=1 || HAS_SWIFT_FILES=0
+say "DEBUG: SWIFT_FILE_COUNT=$SWIFT_FILE_COUNT HAS_SWIFT_FILES=$HAS_SWIFT_FILES PROJECT_DIR=$PROJECT_DIR" >&2
 
 # MACHINE-READABLE MODE: emit ONLY json/sarif to stdout and exit.
 if [[ "$FORMAT" == "json" || "$FORMAT" == "sarif" ]]; then
@@ -2606,10 +1773,10 @@ cat <<'BANNER'
 ╔═══════════════════════════════════════════════════════════════════╗
 ║ ██╗ ██╗██╗ ████████╗██╗███╗ ███╗ █████╗ ████████╗███████╗ ║
 ║ ██║ ██║██║ ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝ ║
-║ ██║ ██║██║ ██║ ██║██╔████╔██║███████║ ██║ █████╗ ║
-║ ██╔══██╗██║ ██║ ██║██║╚██╔╝██║██╔══██║ ██║ ██╔══╝ ║
-║ ╚██████╔╝███████╗██║ ██║██║ ╚═╝ ██║██║ ██║ ██║ ███████╗ ║
-║ ╚═════╝ ╚══════╝╚═╝ ╚═╝╚═╝ ╚═╝╚═╝ ╚═╝ ╚═╝ ╚══════╝ ║
+║ ███████╗██║ ███████║██╔████╗██║██╔██╗ ██║█████╗ ██████╔╝ ║
+║ ╚════██║██║ ██╔══██║██║╚██╔╝██║██║╚██╗██║██╔══╝ ██╔══██╗ ║
+║ ███████║███████╗██║ ██║██║ ╚████║██║ ██║ ███████╗██║ ██║ ║
+║ ╚══════╝ ╚══════╝ ╚═╝ ╚═╝╚═╝ ╚═╝ ██║██║ ╚═╝ ╚══════╝╚═╝ ╚═╝ ║
 ║ ===========::===== ║
 ║ ██████╗ ██╗ ██╗ ██████╗ ===-:=:===== .==== ║
 ║ ██╔══██╗██║ ██║██╔════╝ =====.::.=++ .=== ║
@@ -2622,9 +1789,9 @@ cat <<'BANNER'
 ║ ███████╗ ██████╗ █████╗ ███╗ ██╗███╗ ██╗███████╗██████╗ ║
 ║ ██╔════╝ ██╔═══╝ ██╔══██╗████╗ ██║████╗ ██║██╔════╝██╔══██╗ ║
 ║ ███████╗ ██║ ███████║██╔██╗ ██║██╔██╗ ██║█████╗ ██████╔╝ ║
-║ ╚════██║ ██║ ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝ ██╔══██╗ ║
-║ ███████║ ██████╗ ██║ ██║██║ ╚████║██║ ╚████║███████╗██║ ██║ ║
-║ ╚══════╝ ╚═════╝ ╚═╝╚═╝ ╚═══╝╚═╝ ╚═══╝╚══════╝╚═╝ ╚═╝ ║
+║ ╚════██║ ██║ ██╔══██║██║╚██╔╝██║██║╚██╗██║██╔══╝ ██╔══██╗ ║
+║ ███████║ ██████╗ ██║ ██║██║ ╚████║██║ ██║ ███████╗██║ ██║ ║
+║ ╚══════╝ ╚═════╝ ╚═╝╚═╝ ╚═══╝╚═╝ ╚═══╝ ╚═╝ ╚══════╝╚═╝ ╚═╝ ║
 ║ ║
 ║ Swift module • optionals, concurrency, URLSession, Combine ║
 ║ UBS module: swift • catches force ops & async lifecycle ║
@@ -2652,7 +1819,7 @@ if check_ast_grep; then
  say "${GREEN}${CHECK} ast-grep available (${AST_GREP_CMD[*]}) - full AST analysis enabled${RESET}"
  write_ast_rules || true
 else
- say "${YELLOW}${WARN} ast-grep unavailable - using regex fallback mode${RESET}"
+  say "${YELLOW}${WARN} ast-grep unavailable; using regex fallback mode${RESET}"
 fi
 
 begin_scan_section
@@ -2680,7 +1847,7 @@ tick
 print_subheader "try! and as! occurrences"
 trybang=$("${GREP_RN[@]}" -e "\\btry\\!" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
 asbang=$("${GREP_RN[@]}" -e "\\bas\\![[:space:]]" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
- if [[ "${trybang:-0}" -gt 0 ]]; then print_finding "critical" "$trybang" "try! used"; show_detailed_finding "\\btry!" 5; else print_finding "good" "No try!"; fi
+ if [[ "${trybang:-0}" -gt 0 ]]; then print_finding "warning" "$trybang" "try! used"; show_detailed_finding "\\btry!" 5; else print_finding "good" "No try!"; fi
  if [[ "${asbang:-0}" -gt 0 ]]; then print_finding "warning" "$asbang" "as! used"; show_detailed_finding "\\bas![[:space:]]" 5; else print_finding "good" "No as!"; fi
 tick
 
@@ -2706,9 +1873,9 @@ print_header "2. CONCURRENCY / TASK"
   "Structured concurrency avoids leaks and deadlocks."
 tick
 
-task_count=$("${GREP_RNW[@]}" "Task" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
-async_count=$("${GREP_RN[@]}" -e "\\basync[[:space:]]+" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
-await_count=$("${GREP_RNW[@]}" "await" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+ task_count=$("${GREP_RNW[@]}" "Task" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+ async_count=$("${GREP_RN[@]}" -e "\\basync[[:space:]]+" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
+ await_count=$("${GREP_RNW[@]}" "await" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
 print_finding "info" "$task_count" "Task usages"
  if [[ "${async_count:-0}" -gt "${await_count:-0}" ]]; then
   diff=$((async_count - await_count)); [[ "$diff" -lt 0 ]] && diff=0
@@ -2718,8 +1885,7 @@ tick
 
  print_subheader "@unchecked Sendable / nonisolated(unsafe)"
  unchecked=$("${GREP_RN[@]}" -e "@unchecked[[:space:]]+Sendable|nonisolated\\(unsafe\\)" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
- if [[ "${unchecked:-0}" -gt 0 ]]; then
-  print_finding "warning" "$unchecked" "Concurrency escape hatches used" "Review for thread-safety and actor isolation correctness"
+ if [[ "${unchecked:-0}" -gt 0 ]]; then print_finding "warning" "$unchecked" "Concurrency escape hatches used" "Review for thread-safety and actor isolation correctness"
   show_detailed_finding "@unchecked[[:space:]]+Sendable|nonisolated\\(unsafe\\)" 5
  else
   print_finding "good" "No @unchecked Sendable / nonisolated(unsafe) detected"
@@ -2733,18 +1899,18 @@ fi
 if should_run_category 3; then
 set_category 3
 print_header "3. CLOSURES / CAPTURE LISTS"
-print_category "Detects: strong self in long-lived closures, unowned self hazards" \
+ print_category "Detects: strong self in long-lived closures, unowned self hazards" \
   "Use [weak self] where closures outlive self; prefer guard let self."
 tick
 
  print_subheader "Long-lived closures without [weak self] (heuristic)"
- count=$("${GREP_RN[@]}" -e "(URLSession\\.|DispatchQueue\\.(global|main)|Timer\\.scheduledTimer|NotificationCenter\\.default\\.addObserver|UIView\\.animate|NSAnimationContext\\.runAnimationGroup|\\.sink\\(|\\.onReceive\\()" "$PROJECT_DIR" 2>/dev/null \
+ count=$("${GREP_RN[@]}" -e "(URLSession\\.|DispatchQueue\\.(global|main)|Timer\\.scheduledTimer|NotificationCenter\\.default\\.addObserver|UIView\\.animate|NSAnimationContext\\.runAnimationGroup|\\.sink\\(|\\.onReceive\\())" "$PROJECT_DIR" 2>/dev/null \
   | (grep -A3 -E "\\{[[:space:]]*(\\[[^]]*\\])?" || true) \
   | (grep -vi "\\[weak self\\]" || true) \
-  | count_lines || true
+  | count_lines || true)
   )
  if [[ "${count:-0}" -gt 0 ]]; then
-  print_finding "warning" "$count" "Potential strong self captures in long-lived closures" "Consider capture list [weak self] where appropriate"
+  print_finding "warning" "$count" "Potential strong self captures in long-lived closures"; show_detailed_finding "(URLSession\\.|DispatchQueue\\.(global|main)|Timer\\.scheduledTimer|NotificationCenter\\.default\\.addObserver|UIView\\.animate|NSAnimationContext\\.runAnimationGroup|\\.sink\\(|\\.onReceive\\())" 5
  else
   print_finding "good" "No obvious long-lived closure sites lacking [weak self] by heuristic"
  fi
@@ -2752,8 +1918,7 @@ tick
 
  print_subheader "[unowned self] captures"
  count=$("${GREP_RN[@]}" -e "\\[[^\\]]*unowned[[:space:]]+self[^\\]]*\\]" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
- if [[ "${count:-0}" -gt 0 ]]; then
-  print_finding "warning" "$count" "[unowned self] in closures" "Unowned capture can crash if self deallocates; prefer weak + guard"
+ if [[ "${count:-0}" -gt 0 ]]; then print_finding "warning" "$count" "[unowned self] in closures" "Unowned capture can crash if self deallocates; prefer weak + guard"
   show_detailed_finding "\\[[^\\]]*unowned[[:space:]]+self[^\\]]*\\]" 5
  else
   print_finding "good" "No [unowned self] captures detected"
@@ -2770,7 +1935,7 @@ tick
 
  print_subheader "URLSession task creation sites (review resume/cancel)"
  count=$("${GREP_RN[@]}" -e "\\.(dataTask|uploadTask|downloadTask)\\s*\\(" "$PROJECT_DIR" 2>/dev/null | awk -F: '{print $1":"$2}' | sort -u | wc -l | awk '{print $1+0}' || true)
- if [[ "${count:-0}" -gt 0 ]]; then print_finding "info" "$count" "URLSession tasks created"; else print_finding "good" "No URLSession task creation detected"; fi
+  if [[ "${count:-0}" -gt 0 ]]; then print_finding "info" "$count" "URLSession tasks created"; else print_finding "good" "No URLSession task creation detected"; fi
  tick
 
  run_urlsession_task_correlation
@@ -2784,7 +1949,7 @@ tick
 print_subheader "Blocking Data(contentsOf:)"
 count=$("${GREP_RN[@]}" -e "Data\\(contentsOf:" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
  if [[ "${count:-0}" -gt 0 ]]; then print_finding "warning" "$count" "Data(contentsOf:) usage may block"; show_detailed_finding "Data\\(contentsOf:" 5; else print_finding "good" "No Data(contentsOf:) usage detected"; fi
- tick
+tick
 
  print_subheader "Manual query string building (prefer URLComponents)"
  count=$("${GREP_RN[@]}" -e "URL\\(string:\\s*\"https?://[^\"\\?]+\\?[^\"\\)]*\"\\)" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
@@ -2830,7 +1995,7 @@ tick
 print_subheader "Hardcoded secrets"
 count=$("${GREP_RNI[@]}" -e "(password|api_?key|secret|token)[[:space:]]*[:=][[:space:]]*\"[^\"]+\"" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
  if [[ "${count:-0}" -gt 0 ]]; then print_finding "critical" "$count" "Hardcoded secret lookalikes"; show_detailed_finding "(password|api_?key|secret|token)[[:space:]]*[:=][[:space:]]*\"[^\"]+\"" 5; else print_finding "good" "No obvious hardcoded secrets"; fi
- tick
+tick
 
  print_subheader "Insecure unarchiving (NSKeyedUnarchiver)"
  count=$("${GREP_RN[@]}" -e "NSKeyedUnarchiver\\.unarchiveObject\\(with:|unarchiveTopLevelObjectWithData\\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
@@ -2869,7 +2034,7 @@ fi
 if should_run_category 8; then
 set_category 8
 print_header "8. FILES & I/O"
-print_category "Detects: FileHandle leaks, blocking reads, path string concat" \
+ print_category "Detects: FileHandle leaks, blocking reads, path string concat" \
   "Use URL and ensure closing handles."
 tick
 
@@ -2902,7 +2067,7 @@ print_header "9. THREADING / MAIN"
   "UI work must happen on the main actor."
 tick
 
- print_subheader "UI frameworks used but no @MainActor annotations found (heuristic)"
+print_subheader "UI frameworks used but no @MainActor annotations found (heuristic)"
 ui_files=$("${GREP_RN[@]}" -e "UIKit|AppKit|SwiftUI" "$PROJECT_DIR" 2>/dev/null | cut -d: -f1 | sort -u | count_lines || true)
 mainactor_annots=$("${GREP_RN[@]}" -e "@MainActor" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
  if [[ "${ui_files:-0}" -gt 0 && "${mainactor_annots:-0}" -eq 0 ]]; then
@@ -2912,7 +2077,7 @@ mainactor_annots=$("${GREP_RN[@]}" -e "@MainActor" "$PROJECT_DIR" 2>/dev/null | 
 fi
 tick
 
-print_subheader "sleep/usleep on main queue"
+ print_subheader "sleep/usleep on main queue"
  count=$("${GREP_RN[@]}" -e "DispatchQueue\\.main\\.(async|sync)\\s*\\{[\\s\\S]{0,250}(sleep\\(|usleep\\()" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
  if [[ "${count:-0}" -gt 0 ]]; then print_finding "warning" "$count" "sleep on main queue"; show_detailed_finding "DispatchQueue\\.main\\.(async|sync)\\s*\\{[\\s\\S]{0,250}(sleep\\(|usleep\\()" 5; else print_finding "good" "No sleep/usleep on main queue"; fi
  tick
@@ -2951,7 +2116,7 @@ fi
 if should_run_category 11; then
 set_category 11
 print_header "11. DEBUG / PRODUCTION"
-print_category "Detects: print/NSLog, debug flags, assertions" \
+ print_category "Detects: print/NSLog, debug flags, assertions" \
   "Ensure debug artifacts are stripped from release."
 tick
 
@@ -2959,7 +2124,8 @@ print_subheader "print/NSLog occurrences"
 count=$("${GREP_RN[@]}" -e "^[[:space:]]*print\\s*\\(|\\bNSLog\\s*\\(" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
  if [[ "${count:-0}" -gt 50 ]]; then print_finding "warning" "$count" "Many print/NSLog calls"
  elif [[ "${count:-0}" -gt 10 ]]; then print_finding "info" "$count" "print/NSLog present"
- else print_finding "good" "Minimal print/NSLog"; fi
+ elif [[ "${count:-0}" -gt 0 ]]; then print_finding "info" "$count" "Minimal print/NSLog"
+ else print_finding "good" "No print/NSLog"; fi
  tick
 
  print_subheader "#if DEBUG blocks"
@@ -3064,13 +2230,14 @@ fi
 if should_run_category 17; then
 set_category 17
 print_header "17. INFO.PLIST / ATS"
-print_category "Detects: NSAppTransportSecurity exceptions, arbitrary loads" \
+ print_category "Detects: NSAppTransportSecurity exceptions, arbitrary loads" \
   "ATS exceptions require justification; avoid blanket disables."
 tick
 
 run_plist_checks
+tick
 
- print_subheader "ATS allows arbitrary loads (regex heuristic)"
+print_subheader "ATS allows arbitrary loads (regex heuristic)"
  count=$("${GREP_RN[@]}" -e "NSAppTransportSecurity|NSAllowsArbitraryLoads" "$PROJECT_DIR" 2>/dev/null | (grep -E "true|YES" || true) | count_lines || true)
  if [[ "${count:-0}" -gt 0 ]]; then print_finding "warning" "$count" "ATS arbitrary loads enabled"; else print_finding "good" "No obvious ATS arbitrary-loads strings"; fi
 tick
@@ -3143,12 +2310,12 @@ tick
 
 print_subheader "IBOutlet IUO (T!)"
 count=$("${GREP_RN[@]}" -e "@IBOutlet[[:space:]]+weak[[:space:]]+var[[:space:]]+[A-Za-z_][A-Za-z0-9_]*:[^!]*!" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
- if [[ "${count:-0}" -gt 0 ]]; then print_finding "info" "$count" "@IBOutlet implicitly unwrapped"; show_detailed_finding "@IBOutlet[[:space:]]+weak[[:space:]]+var[[:space:]]+[A-Za-z_][A-Za-z0-9_]*:[^!]*!" 5; else print_finding "good" "No IUO IBOutlets detected"; fi
-tick
+ if [[ "${count:-0}" -gt 0 ]]; then print_finding "info" "$count" "IBOutlet implicitly unwrapped"; show_detailed_finding "@IBOutlet[[:space:]]+weak[[:space:]]+var[[:space:]]+[A-Za-z_][A-Za-z0-9_]*:[^!]*!" 5; else print_finding "good" "No IUO IBOutlets detected"; fi
+ tick
 
  print_subheader "Many storyboards (heuristic)"
 count=$(( $(find "$PROJECT_DIR" -name "*.storyboard" 2>/dev/null | wc -l || echo 0) ))
- if [[ "${count:-0}" -gt 5 ]]; then print_finding "info" "$count" "Many storyboards - consider modularization"; else print_finding "good" "Storyboard count not high"; fi
+if [[ "${count:-0}" -gt 5 ]]; then print_finding "info" "$count" "Many storyboards - consider modularization"; else print_finding "good" "Storyboard count not high"; fi
 fi
 
 # CATEGORY 22
@@ -3162,9 +2329,9 @@ tick
 print_subheader "XCTFail(\"TODO\")"
 count=$("${GREP_RN[@]}" -e "XCTFail\\(\"TODO" "$PROJECT_DIR" 2>/dev/null | count_lines || true)
  if [[ "${count:-0}" -gt 0 ]]; then print_finding "info" "$count" "Placeholder XCTFail"; show_detailed_finding "XCTFail\\(\"TODO" 5; else print_finding "good" "No placeholder XCTFail(\"TODO\")"; fi
-tick
+ tick
 
-print_subheader "sleep/usleep in tests"
+ print_subheader "sleep/usleep in tests"
  count=$("${GREP_RN[@]}" -e "XCTestCase|XCT" "$PROJECT_DIR" 2>/dev/null | (grep -A4 -E "sleep\\(|usleep\\(" || true) | (grep -cE "sleep\\(|usleep\\(" || true))
 count=$(printf '%s\n' "$count" | awk 'END{print $0+0}')
  if [[ "${count:-0}" -gt 0 ]]; then print_finding "info" "$count" "Sleep in tests - use expectations"; else print_finding "good" "No sleep/usleep patterns in tests by heuristic"; fi

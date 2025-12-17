@@ -510,7 +510,7 @@ run_resource_lifecycle_checks() {
     local remediation="${RESOURCE_LIFECYCLE_REMEDIATION[$kind]:-Ensure matching cleanup call}"
     local severity="${RESOURCE_LIFECYCLE_SEVERITY[$kind]:-warning}"
     local desc="$remediation"
-    [[ -n "$message" ]] && desc="$message"
+    [[ -n "$message" ]] && desc+=": $message"
     print_finding "$severity" 1 "$summary [$location]" "$desc"
   done <<<"$output"
 }
@@ -1003,22 +1003,34 @@ ast_count(){
   [[ -n "$rid" && -n "$AST_JSON" && -f "$AST_JSON" ]] || { echo 0; return 0; }
   if command -v python3 >/dev/null 2>&1; then
     python3 - "$AST_JSON" "$rid" <<'PY'
-import json, sys
-path, rid = sys.argv[1], sys.argv[2]
+import json, sys, os
+
+path = sys.argv[1]
+target_id = sys.argv[2]
+
 try:
-    data = json.load(open(path, "r", encoding="utf-8", errors="ignore"))
+    with open(path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
 except Exception:
     print(0)
     sys.exit(0)
 
-c = 0
+out = []
 def walk(o):
-    global c
     if isinstance(o, dict):
         rr = o.get("id") or o.get("rule_id") or o.get("ruleId")
-        # count only objects that look like matches (have file+range)
-        if rr == rid and ("range" in o) and ("file" in o or "path" in o):
-            c += 1
+        if isinstance(rr, str) and ("range" in o) and ("file" in o or "path" in o):
+            if rr == target_id:
+                f = o.get("file") or o.get("path") or "?"
+                rng = o.get("range") or {}
+                start = rng.get("start") or {}
+                line = int(start.get("row", 0)) + 1
+                text = o.get("text") or o.get("snippet") or ""
+                text = " ".join(str(text).split())
+                if text:
+                    out.append((f"{f}:{line}", text[:220]))
+                else:
+                    out.append((f"{f}:{line}", ""))
         for v in o.values():
             walk(v)
     elif isinstance(o, list):
@@ -1026,7 +1038,8 @@ def walk(o):
             walk(it)
 
 walk(data)
-print(c)
+for loc, code in out:
+    print(loc + "\t" + code)
 PY
   else
     grep -o "\"id\"[[:space:]]*:[[:space:]]*\"${rid//\//\\/}\"" "$AST_JSON" 2>/dev/null | wc_num
@@ -1188,9 +1201,7 @@ rule:
     - not:
         inside:
           has:
-            any:
-              - pattern: defer $TICKER.Stop()
-              - pattern: $TICKER.Stop()
+            pattern: $TICKER.Stop()
 severity: warning
 message: "time.NewTicker result not stopped in the containing scope."
 YAML
@@ -1207,7 +1218,6 @@ rule:
         inside:
           has:
             any:
-              - pattern: defer $TIMER.Stop()
               - pattern: $TIMER.Stop()
               - pattern: <-$TIMER.C
 severity: warning
@@ -1232,9 +1242,9 @@ YAML
 id: go.http-newrequest-without-context
 language: go
 rule:
-  pattern: http.NewRequest($$, $$, $$)
+  pattern: http.NewRequest($$)
 severity: info
-message: "Use http.NewRequestWithContext(ctx, ...) to propagate cancellation."
+message: "Prefer http.NewRequestWithContext(ctx, ...) to propagate cancellation."
 YAML
 
   cat >"$AST_RULE_DIR/go.exec-command-without-context.yml" <<'YAML'
@@ -1526,7 +1536,7 @@ severity: info
 message: "rows.Next loop without rows.Err() check; errors may be missed after iteration."
 YAML
 
-  # Tx Begin without deferred rollback (heuristic)
+  # TxBegin without deferred rollback (heuristic)
   cat >"$AST_RULE_DIR/go.sql.begin-without-defer-rollback.yml" <<'YAML'
 id: go.sql.begin-without-defer-rollback
 language: go
@@ -1542,7 +1552,7 @@ rule:
           has:
             any:
               - pattern: defer $TX.Rollback()
-              - pattern: defer func() { _ = $TX.Rollback() }()
+              - pattern: defer func() { $TX.Rollback() }()
               - pattern: defer func() { $TX.Rollback() }()
 severity: warning
 message: "Transaction begun without a deferred tx.Rollback() in the containing scope."
@@ -1651,19 +1661,23 @@ severity: info
 message: "time.NewTimer created but channel never drained; if Stop() fails, timer may fire later (heuristic)."
 YAML
 
-  # WaitGroup Add without Done in same function (heuristic)
+  # WaitGroup not Done in same function (heuristic)
   cat >"$AST_RULE_DIR/go.waitgroup-add-no-done.yml" <<'YAML'
 id: go.waitgroup-add-no-done
 language: go
 rule:
-  all:
-    - pattern: $WG.Add($N)
-    - not:
-        inside:
-          has:
-            pattern: $WG.Done()
+  pattern: |
+    func($NAME) {
+      $WG.Add($N)
+      $S
+      if $COND {
+        return
+      }
+      $T
+      $WG.Done()
+    }
 severity: info
-message: "WaitGroup.Add without Done in same function (heuristic)."
+message: "WaitGroup.Add without nearby Done in same function (heuristic)."
 YAML
 
   # err shadowing: ':=' with err in multi-assign
@@ -1946,44 +1960,38 @@ severity: info
 message: "defer resp.Body.Close() is not placed immediately after a successful request; early returns between may leak connections."
 YAML
 
-  # Context: cancel() deferred late after With* assignment
-  cat >"$AST_RULE_DIR/go.context.cancel-defer-delayed.yml" <<'YAML'
-id: go.context.cancel-defer-delayed
+  # Context: cancel() deferred before err check (panic risk)
+  cat >"$AST_RULE_DIR/go.context.cancel-defer-before-err-check.yml" <<'YAML'
+id: go.context.cancel-defer-before-err-check
 language: go
 rule:
   any:
     - pattern: |
-        $CTX, $CANCEL := context.WithCancel($PARENT)
+        defer $CANCEL()
+        if $ERR != nil { $$$ }
         $S
         $$$
-        defer $CANCEL()
+        $CANCEL()
     - pattern: |
-        $CTX, $CANCEL := context.WithTimeout($PARENT, $DUR)
+        defer $CANCEL()
+        if $ERR != nil { $$$ }
         $S
         $$$
-        defer $CANCEL()
+        $CANCEL()
     - pattern: |
-        $CTX, $CANCEL := context.WithDeadline($PARENT, $DL)
+        defer func() { $CANCEL() }()
+        if $ERR != nil { $$$ }
         $S
         $$$
-        defer $CANCEL()
+        $CANCEL()
     - pattern: |
-        $CTX, $CANCEL = context.WithCancel($PARENT)
+        defer func() { $CANCEL() }()
+        if $ERR != nil { $$$ }
         $S
         $$$
-        defer $CANCEL()
-    - pattern: |
-        $CTX, $CANCEL = context.WithTimeout($PARENT, $DUR)
-        $S
-        $$$
-        defer $CANCEL()
-    - pattern: |
-        $CTX, $CANCEL = context.WithDeadline($PARENT, $DL)
-        $S
-        $$$
-        defer $CANCEL()
-severity: info
-message: "cancel() is deferred later than the With* assignment; defer immediately to avoid leaks on early return."
+        $CANCEL()
+severity: critical
+message: "defer cancel() occurs before checking err; you may be deferring the wrong cancel (shadowing/reassign bug)."
 YAML
 
   # Context: cancel() deferred conditionally inside if after With* assignment
@@ -2038,38 +2046,90 @@ severity: warning
 message: "cancel() is deferred conditionally inside if; prefer unconditional defer cancel() immediately after With*."
 YAML
 
-  # Context: defer cancel() occurs before cancel is re-assigned/shadowed
-  cat >"$AST_RULE_DIR/go.context.cancel-defer-before-shadow.yml" <<'YAML'
-id: go.context.cancel-defer-before-shadow
+  # Context: cancel() deferred conditionally inside if after With* assignment
+  cat >"$AST_RULE_DIR/go.context.cancel-defer-in-if.yml" <<'YAML'
+id: go.context.cancel-defer-in-if
+language: go
+rule:
+  any:
+    - pattern: |
+        $CTX, $CANCEL := context.WithCancel($PARENT)
+        if $COND {
+          $$$
+          defer $CANCEL()
+          $$$
+        }
+    - pattern: |
+        $CTX, $CANCEL := context.WithTimeout($PARENT, $DUR)
+        if $COND {
+          $$$
+          defer $CANCEL()
+          $$$
+        }
+    - pattern: |
+        $CTX, $CANCEL := context.WithDeadline($PARENT, $DL)
+        if $COND {
+          $$$
+          defer $CANCEL()
+          $$$
+        }
+    - pattern: |
+        $CTX, $CANCEL = context.WithCancel($PARENT)
+        if $COND {
+          $$$
+          defer $CANCEL()
+          $$$
+        }
+    - pattern: |
+        $CTX, $CANCEL = context.WithTimeout($PARENT, $DUR)
+        if $COND {
+          $$$
+          defer $CANCEL()
+          $$$
+        }
+    - pattern: |
+        $CTX, $CANCEL = context.WithDeadline($PARENT, $DL)
+        if $COND {
+          $$$
+          defer $CANCEL()
+          $$$
+        }
+severity: warning
+message: "cancel() is deferred conditionally inside if; prefer unconditional defer cancel() immediately after With*."
+YAML
+
+  # Context: cancel() deferred before err check (panic risk)
+  cat >"$AST_RULE_DIR/go.context.cancel-defer-before-err-check.yml" <<'YAML'
+id: go.context.cancel-defer-before-err-check
 language: go
 rule:
   any:
     - pattern: |
         defer $CANCEL()
+        if $ERR != nil { $$$ }
+        $S
         $$$
-        $CTX, $CANCEL := context.WithCancel($PARENT)
+        $CANCEL()
     - pattern: |
         defer $CANCEL()
+        if $ERR != nil { $$$ }
+        $S
         $$$
-        $CTX, $CANCEL := context.WithTimeout($PARENT, $DUR)
+        $CANCEL()
     - pattern: |
-        defer $CANCEL()
+        defer func() { $CANCEL() }()
+        if $ERR != nil { $$$ }
+        $S
         $$$
-        $CTX, $CANCEL := context.WithDeadline($PARENT, $DL)
+        $CANCEL()
     - pattern: |
-        defer $CANCEL()
+        defer func() { $CANCEL() }()
+        if $ERR != nil { $$$ }
+        $S
         $$$
-        $CTX, $CANCEL = context.WithCancel($PARENT)
-    - pattern: |
-        defer $CANCEL()
-        $$$
-        $CTX, $CANCEL = context.WithTimeout($PARENT, $DUR)
-    - pattern: |
-        defer $CANCEL()
-        $$$
-        $CTX, $CANCEL = context.WithDeadline($PARENT, $DL)
-severity: warning
-message: "defer cancel() occurs before cancel is (re)assigned; you may be deferring the wrong cancel (shadowing/reassign bug)."
+        $CANCEL()
+severity: critical
+message: "defer cancel() occurs before checking err; you may be deferring the wrong cancel (shadowing/reassign bug)."
 YAML
 
   # Ignored errors: blank identifier discards Write error
@@ -2078,7 +2138,10 @@ id: go.write-error-ignored
 language: go
 rule:
   any:
-    - pattern: $N, _ := $W.Write($$)
+    - all:
+        - pattern: $N, _ := $W.Write($$)
+        - inside:
+            kind: expression_statement
     - pattern: $N, _ = $W.Write($$)
     - pattern: _, _ := $W.Write($$)
     - pattern: _, _ = $W.Write($$)
@@ -2382,44 +2445,74 @@ show_ast_samples() {
   local rid="$1" limit="${2:-$DETAIL_LIMIT}"
   [[ -n "$rid" && -f "${AST_JSON:-}" && "$HAS_AST_GREP" -eq 1 ]] || return 0
   command -v python3 >/dev/null 2>&1 || return 0
-  python3 - "$AST_JSON" "$rid" "$limit" <<'PY' | while IFS=$'\t' read -r loc code; do
+  python3 - "$AST_JSON" "$rid" "$limit" <<'PY'
 import json, sys
-path, rid, lim = sys.argv[1], sys.argv[2], int(sys.argv[3])
-try:
-    data = json.load(open(path, "r", encoding="utf-8"))
-except Exception:
+from collections import OrderedDict
+
+path = sys.argv[1]
+rid = sys.argv[2]
+lim = int(sys.argv[3])
+
+def iter_match_objs(blob):
+    if isinstance(blob, list):
+        for it in blob:
+            yield from iter_match_objs(it)
+    elif isinstance(blob, dict):
+        # Most ast-grep match objects include rule id + file + range.
+        if ("range" in blob and ("file" in blob or "path" in blob)
+            and (blob.get("id") or blob.get("rule_id") or blob.get("ruleId"))):
+            yield blob
+        for v in blob.values():
+            yield from iter_match_objs(v)
+
+raw = open(path, "r", encoding="utf-8").read()
+if not raw:
     sys.exit(0)
 
-out = []
-def walk(o):
-    if len(out) >= lim:
-        return
-    if isinstance(o, dict):
-        rr = o.get("id") or o.get("rule_id") or o.get("ruleId")
-        if rr == rid and ("file" in o or "path" in o) and "range" in o:
-            f = o.get("file") or o.get("path") or "?"
-            rng = o.get("range") or {}
+root = None
+try:
+    root = json.loads(raw)
+except Exception:
+    # Some versions can stream JSON objects; fall back line-by-line.
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        for match in iter_match_objs(obj):
+            rid2 = match.get("rule_id") or match.get("id") or match.get("ruleId")
+            if rid2 == rid:
+                f = match.get("file") or match.get("path") or "?"
+                rng = match.get("range") or {}
+                start = rng.get("start") or {}
+                line = int(start.get("row", 0)) + 1
+                text = match.get("text") or match.get("snippet") or ""
+                text = " ".join(str(text).split())
+                if text:
+                    print(f"{f}:{line}\t{text[:220]}")
+                else:
+                    print(f"{f}:{line}\t")
+                break
+else:
+    for match in iter_match_objs(root):
+        rid2 = match.get("rule_id") or match.get("id") or match.get("ruleId")
+        if rid2 == rid:
+            f = match.get("file") or match.get("path") or "?"
+            rng = match.get("range") or {}
             start = rng.get("start") or {}
             line = int(start.get("row", 0)) + 1
-            text = o.get("text") or o.get("snippet") or ""
+            text = match.get("text") or match.get("snippet") or ""
             text = " ".join(str(text).split())
             if text:
-                out.append((f"{f}:{line}", text[:220]))
+                print(f"{f}:{line}\t{text[:220]}")
             else:
-                out.append((f"{f}:{line}", ""))
-        for v in o.values():
-            walk(v)
-    elif isinstance(o, list):
-        for it in o:
-            walk(it)
+                print(f"{f}:{line}\t")
+            break
 
-walk(data)
-for loc, text in out:
-    print(loc + "\t" + text)
 PY
-    file="${loc%:*}"; line="${loc##*:}"
-    print_code_sample "$file" "$line" "${code:-}"
-  done
 }
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -2728,7 +2821,7 @@ fi
 if should_skip 5; then
 print_header "5. RESOURCE LIFECYCLE & DEFER"
 print_category "Detects: defer in loops, missing Close/Stop, DB rows leaks" \
-  "Resource mistakes show up as FD leaks and memory growth"
+  "Go resources must be explicitly cleaned up to avoid leaks"
 
 print_subheader "defer inside loops"
 count=$([[ "$HAS_AST_GREP" -eq 1 && -f "$AST_JSON" ]] && ast_count "go.defer-in-loop" || echo 0)
@@ -2787,7 +2880,7 @@ if [ "$tx_rb" -gt 0 ]; then
   [[ "$VERBOSE" -eq 1 ]] && show_ast_samples "go.sql.begin-without-defer-rollback" 6 || true
 fi
 
-print_subheader "tx.Rollback() deferred late after Begin (AST path-sensitive-ish)"
+print_subheader "Tx Begin without deferred Rollback (AST heuristic)"
 tx_rb_late=$([[ "$HAS_AST_GREP" -eq 1 && -f "$AST_JSON" ]] && ast_count "go.sql.defer-rollback-delayed" || echo 0)
 if [ "$tx_rb_late" -gt 0 ]; then
   print_finding "warning" "$tx_rb_late" "defer tx.Rollback() is placed late after Begin (early returns between may skip rollback)"
@@ -2971,7 +3064,6 @@ if [ "$count" -gt 0 ]; then print_finding "warning" "$count" "exec.Command calle
 print_subheader "Dynamic SQL string construction at Exec/Query sinks (AST heuristic)"
 count=$([[ "$HAS_AST_GREP" -eq 1 && -f "$AST_JSON" ]] && ast_count "go.sql-dynamic-string" || echo 0)
 if [ "$count" -gt 0 ]; then print_finding "warning" "$count" "Potential dynamic SQL strings reaching Exec/Query"; fi
-[[ "$VERBOSE" -eq 1 && "$count" -gt 0 ]] && show_ast_samples "go.sql-dynamic-string" "$DETAIL_LIMIT" || true
 
 run_taint_analysis_checks
 fi
@@ -3138,15 +3230,15 @@ except Exception:
     data = None
 
 ids = []
-def walk(obj):
-    if isinstance(obj, dict):
-        rid = obj.get("id") or obj.get("rule_id") or obj.get("ruleId")
-        if isinstance(rid, str) and ("range" in obj) and ("file" in obj or "path" in obj):
+def walk(o):
+    if isinstance(o, dict):
+        rid = o.get("id") or o.get("rule_id") or o.get("ruleId")
+        if isinstance(rid, str) and ("range" in o) and ("file" in o or "path" in o):
             ids.append(rid)
-        for v in obj.values():
+        for v in o.values():
             walk(v)
-    elif isinstance(obj, list):
-        for it in obj:
+    elif isinstance(o, list):
+        for it in o:
             walk(it)
 walk(data)
 
