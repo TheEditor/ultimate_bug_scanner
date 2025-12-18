@@ -19,9 +19,32 @@ warn() { printf "%b %s\n" "${YELLOW}⚠${RESET}" "$*"; }
 err()  { printf "%b %s\n" "${RED}✗${RESET}" "$*" >&2; }
 die()  { err "$*"; exit 1; }
 
+normalize_version() {
+  local raw="${1:-}"
+  raw="${raw#v}"
+  printf '%s' "$raw"
+}
+
+compute_sha256() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+    return 0
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+    return 0
+  fi
+  if command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$file" | awk '{print $NF}'
+    return 0
+  fi
+  return 1
+}
+
 VERSION_FILE="$(cd -- "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/VERSION"
 VERSION_DEFAULT="5.0.0"
-VERSION="${UBS_VERSION:-$(cat "$VERSION_FILE" 2>/dev/null || echo "$VERSION_DEFAULT")}" \
+VERSION="$(normalize_version "${UBS_VERSION:-$(cat "$VERSION_FILE" 2>/dev/null || echo "$VERSION_DEFAULT")}")" \
   || VERSION="$VERSION_DEFAULT"
 
 ARTIFACT_BASE_DEFAULT="https://github.com/Dicklesworthstone/ultimate_bug_scanner/releases/download/v${VERSION}"
@@ -30,7 +53,7 @@ MINISIGN_PUBKEY="${UBS_MINISIGN_PUBKEY:-}"  # Must be set; fails closed otherwis
 INSECURE=0
 
 usage() {
-  printf "%bUsage%b: verify.sh [--version vX.Y.Z] [--insecure] [--install-args \"--easy-mode\"]\n" "$BOLD" "$RESET"
+  printf "%bUsage%b: verify.sh [--version X.Y.Z|vX.Y.Z] [--insecure] [--install-args \"--easy-mode\"]\n" "$BOLD" "$RESET"
   cat <<'USAGE'
 
 Actions:
@@ -51,7 +74,10 @@ INSTALL_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version)
-      VERSION="$2"; ARTIFACT_BASE="https://github.com/Dicklesworthstone/ultimate_bug_scanner/releases/download/v${VERSION}"; shift 2 ;;
+      VERSION="$(normalize_version "$2")"
+      ARTIFACT_BASE="https://github.com/Dicklesworthstone/ultimate_bug_scanner/releases/download/v${VERSION}"
+      shift 2
+      ;;
     --install-args)
       IFS=' ' read -r -a INSTALL_ARGS <<<"$2"; shift 2 ;;
     --insecure)
@@ -67,9 +93,14 @@ if [ "$INSECURE" -eq 1 ]; then
   info "Insecure mode requested: skipping signature and checksum verification."
 fi
 
+if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+  die "Need curl or wget to download release artifacts."
+fi
+
 if [ "$INSECURE" -eq 0 ]; then
   command -v minisign >/dev/null 2>&1 || die "minisign is required for verification (install via your package manager)."
-  command -v sha256sum >/dev/null 2>&1 || die "sha256sum not found; install coreutils."
+  command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || command -v openssl >/dev/null 2>&1 \
+    || die "No SHA256 tool found (need sha256sum, shasum, or openssl)."
   if [ -z "$MINISIGN_PUBKEY" ]; then
     die "UBS_MINISIGN_PUBKEY is not set. Export the minisign public key or rerun with --insecure."
   fi
@@ -101,10 +132,15 @@ download "$ARTIFACT_BASE/install.sh" "$INSTALL_FILE"
 if [ "$INSECURE" -eq 0 ]; then
   minisign -Vm "$S_FILE" -P "$MINISIGN_PUBKEY" -x "$SIG_FILE" >/dev/null \
     || die "Signature verification failed for SHA256SUMS"
-  grep "  install.sh$" "$S_FILE" > "$TMPDIR/install.sha" \
-    || die "install.sh entry missing in checksum file"
-  (cd "$TMPDIR" && sha256sum --check --status install.sha) \
-    || die "Checksum verification failed for install.sh"
+  expected_sum="$(awk '$2=="install.sh"{print $1}' "$S_FILE" | head -n 1)"
+  [ -n "${expected_sum:-}" ] || die "install.sh entry missing in checksum file"
+  actual_sum="$(compute_sha256 "$INSTALL_FILE")" || die "No SHA256 tool found (need sha256sum, shasum, or openssl)."
+  if [[ "$expected_sum" != "$actual_sum" ]]; then
+    err "Checksum verification failed for install.sh"
+    err "Expected: ${expected_sum}"
+    err "Got:      ${actual_sum}"
+    exit 1
+  fi
   ok "Signature + checksum verified"
 else
   warn "Skipping signature and checksum verification (insecure mode)."
