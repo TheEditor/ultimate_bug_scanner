@@ -86,6 +86,13 @@ SAFE_PATTERNS = [
     r"git\s+restore\s+--staged\s+",      # Unstaging (safe)
     r"git\s+clean\s+-n",                 # Dry run
     r"git\s+clean\s+--dry-run",          # Dry run
+    # Allow rm -rf on temp directories (these are designed for ephemeral data)
+    r"rm\s+-[a-z]*r[a-z]*f[a-z]*\s+/tmp/",        # /tmp/...
+    r"rm\s+-[a-z]*r[a-z]*f[a-z]*\s+/var/tmp/",    # /var/tmp/...
+    r"rm\s+-[a-z]*r[a-z]*f[a-z]*\s+\$TMPDIR/",    # $TMPDIR/...
+    r"rm\s+-[a-z]*r[a-z]*f[a-z]*\s+\$\{TMPDIR",   # ${TMPDIR}/... or ${TMPDIR:-...}
+    r'rm\s+-[a-z]*r[a-z]*f[a-z]*\s+"\$TMPDIR/',   # "$TMPDIR/..."
+    r'rm\s+-[a-z]*r[a-z]*f[a-z]*\s+"\$\{TMPDIR',  # "${TMPDIR}/..." or "${TMPDIR:-...}"
 ]
 
 
