@@ -1151,11 +1151,11 @@ PY
       ;;
 
     typos)
-      local version="1.20.7"
+      local version="1.28.4"
       local asset type="tar"
       case "$platform-$arch" in
         linux-x86_64|wsl-x86_64)
-          asset="typos-v${version}-x86_64-unknown-linux-gnu.tar.gz"
+          asset="typos-v${version}-x86_64-unknown-linux-musl.tar.gz"
           ;;
         linux-aarch64|wsl-aarch64)
           asset="typos-v${version}-aarch64-unknown-linux-musl.tar.gz"
