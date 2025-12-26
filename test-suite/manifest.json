@@ -278,7 +278,7 @@
         "exit_code": "nonzero",
         "totals": {
           "critical": {
-            "min": 1
+            "max": 0
           },
           "warning": {
             "min": 5

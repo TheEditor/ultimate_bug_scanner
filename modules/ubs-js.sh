@@ -1149,7 +1149,8 @@ run_type_narrowing_checks() {
   fi
   local has_ts=0
   if command -v rg >/dev/null 2>&1; then
-    if rg -q --hidden "${RG_EXCLUDES[@]}" -g '*.ts' -g '*.tsx' "$PROJECT_DIR" 2>/dev/null; then
+    # Use --files to list matching files (rg -q needs a pattern to search for, which we don't have)
+    if rg --files --hidden "${RG_EXCLUDES[@]}" -g '*.ts' -g '*.tsx' "$PROJECT_DIR" 2>/dev/null | grep -q .; then
       has_ts=1
     fi
   else
