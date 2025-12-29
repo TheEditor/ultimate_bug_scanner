@@ -471,11 +471,31 @@ Unlike traditional linters that fight AI-generated code, this scanner **embraces
 |-------------|-----------------|--------------|
 | **Claude Code Desktop** (`.claude/hooks/on-file-write.sh`) | File-save hook that shells out to `ubs --ci` whenever Claude saves JS/TS files. | Keeps Claude from accepting “Apply Patch” without a fresh scan. |
 | **Cursor** (`.cursor/rules`) | Shared rule block that tells Cursor plans/tasks to run `ubs --fail-on-warning .` and summarize outstanding issues. | Cursor’s autonomous jobs inherit the same QA checklist as humans. |
-| **Codex CLI** (`.codex/rules`) | Adds the identical rule block for Anthropic’s Codex terminal workflow. | Ensures Codex sessions never skip the scanner during long refactors. |
+| **Codex CLI** (`.codex/rules/ubs.md`) | Adds the identical rule block for OpenAI's Codex terminal workflow. Supports both file and directory formats (v0.77.0+). | Ensures Codex sessions never skip the scanner during long refactors. |
 | **Gemini Code Assist** (`.gemini/rules`) | Guidance instructing Gemini agents to run `ubs` before closing a ticket. | Keeps Gemini’s asynchronous fixes aligned with UBS exit criteria. |
 | **Windsurf** (`.windsurf/rules`) | Guardrail text + sample command palette snippet referencing `ubs`. | Windsurf’s multi-step plans stay grounded in the same quality gate. |
 | **Cline** (`.cline/rules`) | Markdown instructions that Cline’s VS Code extension ingests. | Forces every “tool call” from Cline to mention scanner findings. |
-| **OpenCode MCP** (`.opencode/rules`) | Local MCP instructions so HTTP tooling always calls `ubs` before replying. | Makes OpenCode’s multi-agent swarms share the same notion of “done”. |
+| **OpenCode MCP** (`.opencode/rules`) | Local MCP instructions so HTTP tooling always calls `ubs` before replying. | Makes OpenCode's multi-agent swarms share the same notion of "done". |
+
+#### Codex CLI v0.77.0+ Migration Note
+
+Starting with Codex CLI v0.77.0, the rules storage changed from a **single file** (`.codex/rules`) to a **directory** (`.codex/rules/`) containing individual rule files. The UBS installer handles both formats automatically:
+
+| Codex Version | Rules Location | UBS Installer Behavior |
+|---------------|----------------|------------------------|
+| < v0.77.0 | `.codex/rules` (file) | Appends UBS quick reference to file |
+| ≥ v0.77.0 | `.codex/rules/` (directory) | Creates `.codex/rules/ubs.md` |
+
+**If you upgraded Codex and encounter issues**, migrate manually:
+
+```bash
+# Convert file to directory structure
+mv ~/.codex/rules ~/.codex/rules.backup
+mkdir ~/.codex/rules
+mv ~/.codex/rules.backup ~/.codex/rules/ubs.md
+```
+
+The installer's `append_quick_reference_block()` function detects the storage format at runtime and writes to the appropriate location, so re-running `install.sh` after upgrading Codex will "just work."
 
 ### **Why This Matters for AI Workflows**
 
