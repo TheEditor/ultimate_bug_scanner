@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
 # UBS Meta-Runner (v1.0)
-# Unified dispatcher for Ultimate Bug Scanner across JS/TS, Python, C/C++, Rust, Go, Java, Ruby
+# Unified dispatcher for Ultimate Bug Scanner across JS/TS, Python, C/C++, Rust, Go, Java, Ruby, Swift
 # - Detects languages
 # - Ensures modules (lazy download)
 # - Runs modules concurrently
@@ -18,15 +18,38 @@ MODULE_PATH_TEMPLATE="$REPO_RAW/modules/ubs-%s.sh"
 
 # Known-good module digests (sha256) for supply-chain verification.
 declare -A MODULE_CHECKSUMS=(
-  [cpp]='2a3e1b32e010a0e6ff290ffee9c7a7ff6395d73f83711137b46299e8bc699be2'
-  [golang]='14fcbc2650cc6775231d742e9d40788903fdb8abb1be89ff63eb7ddd49a2189b'
-  [java]='c7888dae1c2ef47eb24ecce7fb9cf7a684abdd46021688d99f3df99545ac7906'
-  [js]='c2f924229895b6d77ba4661a310a7aba8d45468930d65cebcc97669856011260'
-  [python]='f025705876bc43369da75cba76467e5e1c67ddf46271a781714d3bd6b51e6fd7'
-  [ruby]='16a77ca502bf2272b79e78fcbb00a54b3c396f2a11fdd31d756502360917cdda'
-  [rust]='c371c761a632c478b827bc259498145f8cf6ff55d8cb06360d5732c1e272e467'
-  [swift]='0a3c0f472482e47e9c2c740f911085e3bd58044a3f85bbcdee16a6676d1f914a'
+  [cpp]='ac6a213e3cb8fc2eb24d18754c1e83c994c89149e5f690116d848c57548e6f28'
+  [golang]='37d2a4502fcb245f910a96a0cfdcdfda3c76945115eafe10f329d9f9eb2a830f'
+  [java]='6b120bd6bd199d45e5f80d295888aeab10c1439abe064797047e776258b37256'
+  [js]='0cd1d7dbf90c5bdcdc258bc33b100fbc9171e41971ea1400403cffaafa60a038'
+  [python]='e7697af93a7a2b0e413ecb17bf878656ee92229a7fbe47c1fa77f779dd6c9a43'
+  [ruby]='3490a56a174f4873d01a83d4ceac8bdb7b6d56024c9aff25257af28c9d805405'
+  [rust]='5c0df5f4638cc18aca08b9bad263d677ccaa3b180670a4d47ebba1a071e782f0'
+  [swift]='b350c2ae42725f96a2c94eaf7c70ff4864ecae53e0fc7d9a3fee5988128c8a2a'
 )
+
+# Helper assets used by some modules (AST correlation and type narrowing).
+declare -A HELPER_CHECKSUMS=(
+  ['helpers/resource_lifecycle_go.go']='10215d2c772dd7905a7e9c60a56899a9d702f1c950e1bfd30d4eb90b190e38bd'
+  ['helpers/resource_lifecycle_java.py']='c005da1519eaa751ccf6fa45f99f884aaa30492f91b7c1b527f7f9b782df39f1'
+  ['helpers/resource_lifecycle_py.py']='1e884ff42c988fa6a19f9b8f8375bde2334ebcde61735bc4f10b7dc3c900483e'
+  ['helpers/type_narrowing_kotlin.py']='d09302608e75e60d6b871934fb62db9c54c3801daec47c97af57d2a02f7df748'
+  ['helpers/type_narrowing_rust.py']='355ad60ce6dffb9a7c63169cb83705854612c931e2e8c3a166a81b0cb810647f'
+  ['helpers/type_narrowing_swift.py']='f950bafa92391964e4779c77d37dcc11b0ffeab9bc351be439b4709c0f01b41a'
+  ['helpers/type_narrowing_ts.js']='d7bc276be2b0031df4e4ed4da974f19390fb498bf7183bcee0a5b624b3bd4fee'
+)
+
+HELPER_ASSETS=(
+  "helpers/resource_lifecycle_py.py"
+  "helpers/resource_lifecycle_go.go"
+  "helpers/resource_lifecycle_java.py"
+  "helpers/type_narrowing_ts.js"
+  "helpers/type_narrowing_rust.py"
+  "helpers/type_narrowing_kotlin.py"
+  "helpers/type_narrowing_swift.py"
+)
+
+HELPERS_READY=0
 
 # Pinned ast-grep release for tool-cache auto-provisioning (JS/TS accuracy).
 AST_GREP_VERSION="0.40.1"
@@ -80,7 +103,13 @@ def to_url(path_str, line):
     if not candidate.is_absolute():
         candidate = root / candidate
     try:
-        rel = candidate.resolve().relative_to(root)
+        resolved = candidate.resolve(strict=True)
+    except Exception:
+        return None
+    if not resolved.is_file():
+        return None
+    try:
+        rel = resolved.relative_to(root)
     except Exception:
         return None
     return f"{blob}/{rel.as_posix()}#L{line}"
@@ -128,6 +157,7 @@ SESSION_ENTRIES=1
 SESSION_RAW=0
 SESSION_LOG_DIR_OVERRIDE=""
 VERIFY_MODULE_ERR=""
+VERIFY_HELPER_ERR=""
 ALL_LANGS=(js python cpp rust golang java ruby swift)
 UPDATE_ONLY=0
 FORCE_SELF_UPDATE=0
@@ -188,7 +218,7 @@ Options:
   --jobs=N                Parallelism hint (passed to children if supported)
   --ignore-file=PATH      Read additional ignore globs (default: PROJECT/.ubsignore if present)
   --skip-type-narrowing   Skip JS/Rust/Kotlin/Swift type narrowing checks (falls back to basic heuristics)
-  --no-auto-update        Disable automatic self-update
+  --no-auto-update        Disable auto-update (even if UBS_ENABLE_AUTO_UPDATE=1)
   --staged                Scan only files staged for commit (git index)
   --diff, --git-diff      Scan only modified files (working tree vs HEAD)
   -h, --help              Show this help
@@ -755,7 +785,7 @@ ensure_ast_grep_tool_cache(){
   if [[ "$need_download" -eq 1 ]]; then
     [[ "${QUIET:-0}" -eq 0 ]] && say_err "${DIM}${INFO}${RESET} Downloading ast-grep ${AST_GREP_VERSION} (${target})..."
     local tmp_zip
-    tmp_zip="$(mktemp -t ubs-ast-grep.XXXXXX 2>/dev/null || mktemp)"
+    tmp_zip="$(mktemp -t ubs-ast-grep.XXXXXX 2>/dev/null || mktemp "${TMPDIR:-/tmp}/ubs-ast-grep.XXXXXX" 2>/dev/null)"
     if ! download_url_to_file "$url" "$tmp_zip"; then
       say_err "${RED}${X}${RESET} failed to download ast-grep: $url"
       say_err "${DIM}Install ast-grep manually (https://ast-grep.github.io/) or re-run install.sh.${RESET}"
@@ -889,6 +919,7 @@ def has_suppression(line_content):
     return any(m in lower for m in SUPPRESSION_MARKERS)
 
 def main():
+    lines = []
     try:
         # Read all lines first to ensure we consume the stream (prevents SIGPIPE upstream)
         lines = input_stream.readlines()
@@ -986,6 +1017,28 @@ verify_module_checksum(){
   return 0
 }
 
+verify_helper_checksum(){
+  local rel="$1" path="$2"
+  local expected="${HELPER_CHECKSUMS[$rel]:-}"
+  VERIFY_HELPER_ERR=""
+  should_verify_module_path "$path" || return 0
+  [[ -n "$expected" ]] || return 0
+  if [[ ! -f "$path" ]]; then
+    VERIFY_HELPER_ERR="helper file not found at $path"
+    return 1
+  fi
+  local actual
+  if ! actual="$(compute_sha256 "$path")"; then
+    VERIFY_HELPER_ERR="unable to compute checksum (install sha256sum, shasum, or openssl)"
+    return 2
+  fi
+  if [[ "$actual" != "$expected" ]]; then
+    VERIFY_HELPER_ERR="checksum mismatch for $rel (expected $expected, got $actual)"
+    return 1
+  fi
+  return 0
+}
+
 DOCTOR_FAILS=0
 DOCTOR_WARNINGS=0
 doctor_report(){
@@ -1006,6 +1059,46 @@ doctor_report(){
       say "  ${RED}${X}${RESET} $message"
       ;;
   esac
+}
+
+doctor_check_cached_helpers(){
+  local fix="$1"
+  local rel helper_path verify_status
+  for rel in "${HELPER_ASSETS[@]:-}"; do
+    helper_path="$MODULE_DIR/$rel"
+    if [[ -f "$helper_path" ]]; then
+      if verify_helper_checksum "$rel" "$helper_path"; then
+        doctor_report ok "helper checksum verified ($helper_path)"
+      else
+        verify_status=$?
+        if [[ $verify_status -eq 2 ]]; then
+          doctor_report err "helper $rel: $VERIFY_HELPER_ERR"
+        else
+          if [[ "$fix" -eq 1 ]]; then
+            say "    ${DIM}Refreshing helper $rel...${RESET}"
+            if download_helper_asset "$rel" "$helper_path"; then
+              doctor_report ok "helper refreshed and verified ($rel)"
+            else
+              doctor_report err "Failed to refresh helper $rel: ${VERIFY_HELPER_ERR:-see logs}"
+            fi
+          else
+            doctor_report err "helper $rel: $VERIFY_HELPER_ERR (re-run with --fix)"
+          fi
+        fi
+      fi
+    else
+      if [[ "$fix" -eq 1 ]]; then
+        say "    ${DIM}Caching helper $rel...${RESET}"
+        if download_helper_asset "$rel" "$helper_path"; then
+          doctor_report ok "helper downloaded and verified ($rel)"
+        else
+          doctor_report err "Failed to download helper $rel: ${VERIFY_HELPER_ERR:-see logs}"
+        fi
+      else
+        doctor_report warn "helper $rel not cached yet (use --fix to pre-download)"
+      fi
+    fi
+  done
 }
 
 run_doctor(){
@@ -1086,10 +1179,11 @@ run_doctor(){
     fi
   fi
 
-  local lang module_path verify_status
+  local lang module_path verify_status cached_modules=0
   for lang in "${ALL_LANGS[@]}"; do
     module_path="$(resolve_module_path "$lang")"
     if should_verify_module_path "$module_path"; then
+      cached_modules=1
       if [[ -f "$module_path" ]]; then
         if verify_module_checksum "$lang" "$module_path"; then
           doctor_report ok "$lang module checksum verified ($module_path)"
@@ -1130,6 +1224,10 @@ run_doctor(){
       fi
     fi
   done
+
+  if [[ "$cached_modules" -eq 1 ]]; then
+    doctor_check_cached_helpers "$fix"
+  fi
 
   if [[ $DOCTOR_FAILS -gt 0 ]]; then
     say "${RED}${X}${RESET} Doctor detected $DOCTOR_FAILS blocking issue(s)."
@@ -1380,25 +1478,169 @@ download_module(){
   ensure_dir "$(dirname "$path")"
   local url; url=$(printf '%s' "$MODULE_PATH_TEMPLATE" | sed "s/%s/$lang/")
   say "${BLUE}${INFO}${RESET} fetching module ${BOLD}$lang${RESET} → ${DIM}$path${RESET}"
+  local tmp
+  tmp="$(mktemp -t "ubs-${lang}.XXXXXX" 2>/dev/null || mktemp "${TMPDIR:-/tmp}/ubs-${lang}.XXXXXX" 2>/dev/null)" || {
+    say "${RED}$X failed to create temp file for module download${RESET}"
+    return 1
+  }
   if need_cmd curl; then
-    curl -fsSL "$url" -o "$path"
-  elif need_cmd wget; then
-    wget -q "$url" -O "$path"
-  else
-    say "${RED}$X neither curl nor wget available${RESET}"; return 1
-  fi
-  # sanity checks
-  if [ ! -s "$path" ]; then say "${RED}$X empty module file for $lang${RESET}"; return 1; fi
-  local head; head="$(head -n 1 "$path" | tr -d '\r')"
-  if [[ ! "$head" =~ ^#! ]]; then say "${RED}$X module missing shebang (lang=$lang)${RESET}"; return 1; fi
-  chmod +x "$path" || true
-  if should_verify_module_path "$path"; then
-    if ! verify_module_checksum "$lang" "$path"; then
-      local err_msg="${VERIFY_MODULE_ERR:-checksum verification failed for $lang}"
-      say "${RED}$X failed to verify module ${BOLD}$lang${RESET}: $err_msg"
-      rm -f "$path" 2>/dev/null || true
+    if ! curl -fsSL "$url" -o "$tmp"; then
+      say "${RED}$X failed to download module ${BOLD}$lang${RESET}"
+      rm -f "$tmp" 2>/dev/null || true
       return 1
     fi
+  elif need_cmd wget; then
+    if ! wget -q "$url" -O "$tmp"; then
+      say "${RED}$X failed to download module ${BOLD}$lang${RESET}"
+      rm -f "$tmp" 2>/dev/null || true
+      return 1
+    fi
+  else
+    say "${RED}$X neither curl nor wget available${RESET}"
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  # sanity checks
+  if [ ! -s "$tmp" ]; then
+    say "${RED}$X empty module file for $lang${RESET}"
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  local head; head="$(head -n 1 "$tmp" | tr -d '\r')"
+  if [[ ! "$head" =~ ^#! ]]; then
+    say "${RED}$X module missing shebang (lang=$lang)${RESET}"
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if should_verify_module_path "$path"; then
+    VERIFY_MODULE_ERR=""
+    local expected="${MODULE_CHECKSUMS[$lang]:-}"
+    if [[ -n "$expected" ]]; then
+      local sha
+      if ! sha="$(compute_sha256 "$tmp")"; then
+        VERIFY_MODULE_ERR="unable to compute checksum (install sha256sum, shasum, or openssl)"
+      elif [[ "$sha" != "$expected" ]]; then
+        VERIFY_MODULE_ERR="checksum mismatch for $lang (expected $expected, got $sha)"
+      fi
+    fi
+    if [[ -n "${VERIFY_MODULE_ERR:-}" ]]; then
+      local err_msg="${VERIFY_MODULE_ERR}"
+      say "${RED}$X failed to verify module ${BOLD}$lang${RESET}: $err_msg"
+      rm -f "$tmp" 2>/dev/null || true
+      return 1
+    fi
+  fi
+  if ! mv "$tmp" "$path"; then
+    say "${RED}$X failed to finalize module ${BOLD}$lang${RESET} to ${DIM}$path${RESET}"
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  chmod +x "$path" 2>/dev/null || true
+  return 0
+}
+
+download_helper_asset(){
+  local rel="$1" path="$2"
+  ensure_dir "$(dirname "$path")"
+  local url="${REPO_RAW}/modules/${rel}"
+  say "${BLUE}${INFO}${RESET} fetching helper ${BOLD}$rel${RESET} → ${DIM}$path${RESET}"
+  local tmp
+  tmp="$(mktemp -t "ubs-helper.XXXXXX" 2>/dev/null || mktemp "${TMPDIR:-/tmp}/ubs-helper.XXXXXX" 2>/dev/null)" || {
+    say "${RED}$X failed to create temp file for helper download${RESET}"
+    return 1
+  }
+  if need_cmd curl; then
+    if ! curl -fsSL "$url" -o "$tmp"; then
+      say "${RED}$X failed to download helper ${BOLD}$rel${RESET}"
+      rm -f "$tmp" 2>/dev/null || true
+      return 1
+    fi
+  elif need_cmd wget; then
+    if ! wget -q "$url" -O "$tmp"; then
+      say "${RED}$X failed to download helper ${BOLD}$rel${RESET}"
+      rm -f "$tmp" 2>/dev/null || true
+      return 1
+    fi
+  else
+    say "${RED}$X neither curl nor wget available${RESET}"
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if [ ! -s "$tmp" ]; then
+    say "${RED}$X empty helper file for $rel${RESET}"
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  if should_verify_module_path "$path"; then
+    VERIFY_HELPER_ERR=""
+    local expected="${HELPER_CHECKSUMS[$rel]:-}"
+    if [[ -n "$expected" ]]; then
+      local sha
+      if ! sha="$(compute_sha256 "$tmp")"; then
+        VERIFY_HELPER_ERR="unable to compute checksum (install sha256sum, shasum, or openssl)"
+      elif [[ "$sha" != "$expected" ]]; then
+        VERIFY_HELPER_ERR="checksum mismatch for $rel (expected $expected, got $sha)"
+      fi
+    fi
+    if [[ -n "${VERIFY_HELPER_ERR:-}" ]]; then
+      local err_msg="${VERIFY_HELPER_ERR}"
+      say "${RED}$X failed to verify helper ${BOLD}$rel${RESET}: $err_msg"
+      rm -f "$tmp" 2>/dev/null || true
+      return 1
+    fi
+  fi
+  if ! mv "$tmp" "$path"; then
+    say "${RED}$X failed to finalize helper ${BOLD}$rel${RESET} to ${DIM}$path${RESET}"
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
+ensure_helper_asset(){
+  local rel="$1"
+  local path="$MODULE_DIR/$rel"
+  if [ "$UPDATE_MODULES" -eq 1 ] || [ ! -f "$path" ]; then
+    download_helper_asset "$rel" "$path" || return 1
+  fi
+  if should_verify_module_path "$path" && [ -f "$path" ]; then
+    if ! verify_helper_checksum "$rel" "$path"; then
+      local verify_code=$?
+      if [[ $verify_code -eq 2 ]]; then
+        say "${RED}$X ${VERIFY_HELPER_ERR}${RESET}"
+        rm -f "$path" 2>/dev/null || true
+        return 1
+      fi
+      say "${YELLOW}${WARN}${RESET} cached helper $rel failed verification (${VERIFY_HELPER_ERR:-corrupt}); refreshing..."
+      download_helper_asset "$rel" "$path" || { rm -f "$path" 2>/dev/null || true; return 1; }
+    fi
+  fi
+  return 0
+}
+
+ensure_cached_helpers(){
+  local mode="${1:-scan}" # scan|doctor
+  if [[ "$mode" == "scan" && "${UPDATE_MODULES:-0}" -eq 0 && "${HELPERS_READY:-0}" -eq 1 ]]; then
+    return 0
+  fi
+
+  local failures=0
+  local rel
+  for rel in "${HELPER_ASSETS[@]:-}"; do
+    if ! ensure_helper_asset "$rel"; then
+      failures=$((failures+1))
+      if [[ "$mode" == "scan" ]]; then
+        say "${YELLOW}${WARN}${RESET} helper unavailable: ${DIM}$rel${RESET} (${VERIFY_HELPER_ERR:-download/verification failed}); continuing with reduced accuracy"
+      fi
+    fi
+  done
+
+  if [[ "$failures" -eq 0 ]]; then
+    HELPERS_READY=1
+  fi
+
+  if [[ "$mode" == "doctor" ]]; then
+    return "$failures"
   fi
   return 0
 }
@@ -1418,6 +1660,7 @@ ensure_module(){
       say "${YELLOW}${WARN}${RESET} cached $lang module failed verification (${VERIFY_MODULE_ERR:-corrupt}); refreshing..."
       download_module "$lang" "$path" || return 1
     fi
+    ensure_cached_helpers "scan" || true
   fi
   return 0
 }
@@ -1426,8 +1669,13 @@ ensure_module(){
 # Self-update logic
 # ─────────────────────────────────────────────────────────────────────────────
 check_and_update_self(){
-  # Skip if explicitly disabled
-  if [[ "${FORCE_SELF_UPDATE:-0}" -eq 0 && ( "${UBS_NO_AUTO_UPDATE:-0}" -eq 1 || "${CI_MODE:-0}" -eq 1 ) ]]; then return 0; fi
+  # Auto-update is opt-in (security-first). Enable by setting:
+  #   UBS_ENABLE_AUTO_UPDATE=1
+  # Always skip in CI, or when explicitly disabled via UBS_NO_AUTO_UPDATE / --no-auto-update.
+  if [[ "${FORCE_SELF_UPDATE:-0}" -eq 0 ]]; then
+    [[ "${UBS_ENABLE_AUTO_UPDATE:-0}" -eq 1 ]] || return 0
+    if [[ "${UBS_NO_AUTO_UPDATE:-0}" -eq 1 || "${CI_MODE:-0}" -eq 1 ]]; then return 0; fi
+  fi
   
   # Only update if we're running the installed binary (not a local repo script)
   # Heuristic: if the script dir contains .git, we're likely in a dev environment
@@ -1479,7 +1727,7 @@ check_and_update_self(){
     
     # Write new content to temp file
     local tmp_self
-    tmp_self=$(mktemp)
+    tmp_self="$(mktemp -t ubs-self.XXXXXX 2>/dev/null || mktemp "${TMPDIR:-/tmp}/ubs-self.XXXXXX" 2>/dev/null)"
     printf '%s' "$remote_content" > "$tmp_self"
     chmod +x "$tmp_self"
     
@@ -1609,7 +1857,10 @@ run_lang(){
         module_status=$?
       fi
       restore_original_paths "$out_json"
-      if need_cmd jq && jq -e . "$out_json" >/dev/null 2>&1; then
+      # Modules that implement --format=json must emit a UBS summary *object*.
+      # If they emit other JSON types (e.g., an array of findings), fall back to
+      # text mode so we can still produce a stable combined summary.
+      if need_cmd jq && jq -e 'type=="object"' "$out_json" >/dev/null 2>&1; then
         jq --arg language "$lang" '. + {language: $language}' "$out_json" > "$out_json.tmp" && mv "$out_json.tmp" "$out_json"
         attach_metrics_to_json "$out_json" "$metrics_dir"
       else
@@ -1713,6 +1964,8 @@ from pathlib import Path
 json_path = Path(sys.argv[1])
 with json_path.open() as fh:
     data = json.load(fh)
+if not isinstance(data, dict):
+    sys.exit(0)
 extras = data.get("extras", {})
 for extra_path in map(Path, sys.argv[2:]):
     try:
@@ -1779,10 +2032,10 @@ merge_json_scanners(){
     def nz(x): if (x|type)=="number" then x else 0 end;
     {project:$project, timestamp:$ts, scanners: .,
      totals:{
-       critical: (map(.critical // 0) | add),
-       warning:  (map(.warning  // 0) | add),
-       info:     (map(.info     // 0) | add),
-       files:    (map(.files    // 0) | add)
+       critical: (map(nz(.critical)) | add),
+       warning:  (map(nz(.warning))  | add),
+       info:     (map(nz(.info))     | add),
+       files:    (map(nz(.files))    | add)
      }}' "${jsons[@]}")
 
   # Now merge in findings from *.findings.json files (if any exist)
@@ -1854,16 +2107,29 @@ merge_sarif_runs(){
   fi
   # Accept either raw SARIF root or wrapped under "sarifLog"
   # Note: (... | add) // [] handles the case where add returns null (empty/null arrays)
-  jq -s --arg repo "$GIT_REMOTE_HTTP" --arg rev "$GIT_COMMIT_SHA" --arg auto "$SARIF_AUTOMATION_ID" '
-    def toRuns(x):
-      if x.sarifLog? then (x.sarifLog.runs // [])
-      elif x.version? and x.runs? then (x.runs // [])
-      else [] end;
-    def attachMeta(run):
-      (if ($repo|length) > 0 then run + {versionControlProvenance:[{repositoryUri:$repo, revisionId:$rev}]}
-       else run end)
-      | (if ($auto|length) > 0 then . + {automationDetails:{id:$auto}} else . end);
-    {"version":"2.1.0","runs": ((map(toRuns(.)) | add) // [] | map(attachMeta(.)))}' "${valid_sarifs[@]}"
+  local jq_err="$TMPDIR_RUN/sarif-merge.err"
+  if jq -s --arg repo "$GIT_REMOTE_HTTP" --arg rev "$GIT_COMMIT_SHA" --arg auto "$SARIF_AUTOMATION_ID" '
+      def toRuns(x):
+        if x.sarifLog? then (x.sarifLog.runs // [])
+        elif x.version? and x.runs? then (x.runs // [])
+        else [] end;
+      def attachMeta(run):
+        (if ($repo|length) > 0 then run + {versionControlProvenance:[{repositoryUri:$repo, revisionId:$rev}]}
+         else run end)
+        | (if ($auto|length) > 0 then . + {automationDetails:{id:$auto}} else . end);
+      {"version":"2.1.0","runs": ((map(toRuns(.)) | add) // [] | map(attachMeta(.)))}' "${valid_sarifs[@]}" 2>"$jq_err"; then
+    return 0
+  fi
+
+  # Common when the user truncates output: `ubs --format=sarif ... | head -n 20`.
+  # Do not treat SIGPIPE/EPIPE as a fatal error.
+  if grep -q "Broken pipe" "$jq_err" 2>/dev/null; then
+    return 0
+  fi
+
+  say_err "${YELLOW}${WARN}${RESET} Failed to merge SARIF runs"
+  cat "$jq_err" >&2 || true
+  return 1
 }
 
 write_jsonl_summary(){
@@ -2164,11 +2430,26 @@ case "$FORMAT" in
       fi
     fi
     ;;
-esac
+	esac
 
-if [[ "$HAS_ENV_ERROR" -eq 1 ]]; then
-  [[ -n "$BEADS_JSONL_PATH" ]] && say_err "${YELLOW}${WARN}${RESET} Skipping Beads JSONL export due to environment error."
-  [[ -n "$REPORT_JSON_PATH" || -n "$HTML_REPORT_PATH" || -n "$COMPARISON_FILE" ]] \
+	# Ensure exit status reflects merged totals in machine formats too.
+	# Some modules emit machine output but always exit 0; the meta-runner should still fail
+	# when critical findings exist (or warnings in --fail-on-warning mode).
+	if [[ "$HAS_ENV_ERROR" -eq 0 && ( "$FORMAT" == "json" || "$FORMAT" == "jsonl" || "$FORMAT" == "sarif" ) ]]; then
+	  if need_cmd jq && generate_combined_json; then
+	    crit=$(jq -r '.totals.critical // 0' "$COMBINED_JSON_FILE" 2>/dev/null || echo 0)
+	    warn=$(jq -r '.totals.warning // 0' "$COMBINED_JSON_FILE" 2>/dev/null || echo 0)
+	    crit=${crit:-0}; warn=${warn:-0}
+	    desired=0
+	    if [[ "$FAIL_ON_WARNING" -eq 1 && $((crit + warn)) -gt 0 ]]; then desired=1; fi
+	    if [[ "$FAIL_ON_WARNING" -eq 0 && "$crit" -gt 0 ]]; then desired=1; fi
+	    if [[ "$desired" -gt "$status" ]]; then status="$desired"; fi
+	  fi
+	fi
+
+	if [[ "$HAS_ENV_ERROR" -eq 1 ]]; then
+	  [[ -n "$BEADS_JSONL_PATH" ]] && say_err "${YELLOW}${WARN}${RESET} Skipping Beads JSONL export due to environment error."
+	  [[ -n "$REPORT_JSON_PATH" || -n "$HTML_REPORT_PATH" || -n "$COMPARISON_FILE" ]] \
     && say_err "${YELLOW}${WARN}${RESET} Skipping shareable artifacts due to environment error."
 elif [[ -n "$BEADS_JSONL_PATH" ]]; then
   if ! write_jsonl_summary "$BEADS_JSONL_PATH"; then

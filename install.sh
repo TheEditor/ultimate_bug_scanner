@@ -345,6 +345,14 @@ mktemp_in_workdir() {
   echo "$path"
 }
 
+mktemp_dir_in_workdir() {
+  local template="${1:-ubs.XXXXXX}"
+  local path
+  path="$(mktemp -d -p "$WORKDIR" "$template" 2>/dev/null || mktemp -d "${WORKDIR}/${template}")"
+  register_temp_path "$path"
+  echo "$path"
+}
+
 safe_remove_temp() {
   local target="$1"
   [[ -z "$target" ]] && return 0
@@ -377,33 +385,18 @@ cleanup_on_exit() {
 
 release_lock() {
   if [ "$LOCK_OWNED" -eq 1 ]; then
-    if [ "$LOCK_METHOD" = "flock" ] && [ -n "$LOCK_FD" ]; then
-      flock -u "$LOCK_FD" 2>/dev/null || true
-      eval "exec ${LOCK_FD}>&-"
-    else
-      rmdir "$LOCK_FILE" 2>/dev/null || true
-    fi
+    rmdir "$LOCK_FILE" 2>/dev/null || true
     LOCK_OWNED=0
   fi
 }
 
 acquire_lock() {
-  if command -v flock >/dev/null 2>&1; then
-    LOCK_METHOD="flock"
-    exec {LOCK_FD}> "$LOCK_FILE"
-    if flock -n "$LOCK_FD"; then
-      LOCK_OWNED=1
-      return 0
-    else
-      error "Another installation is already in progress."
-      error "If this is incorrect, delete $LOCK_FILE and retry."
-      exit 1
-    fi
-  fi
-
+  # Use a directory lock for safety. File-based locks in /tmp can follow symlinks
+  # and truncate arbitrary files if the installer is run with elevated privileges.
   LOCK_METHOD="dir"
   if mkdir "$LOCK_FILE" 2>/dev/null; then
     LOCK_OWNED=1
+    return 0
   else
     error "Another installation is already in progress."
     error "If this is incorrect, delete $LOCK_FILE and retry."
@@ -1010,8 +1003,7 @@ download_binary_release() {
   log "Attempting binary download for $tool ($platform-$arch)..."
   local err_log temp_dir
   err_log="$(mktemp_in_workdir "${tool}.download.err.XXXXXX")"
-  temp_dir="$(mktemp -d -p "$WORKDIR" "${tool}.download.XXXXXX")"
-  register_temp_path "$temp_dir"
+  temp_dir="$(mktemp_dir_in_workdir "${tool}.download.XXXXXX")"
 
   case "$tool" in
     ripgrep)
@@ -1918,7 +1910,7 @@ uninstall_ubs() {
     fi
   fi
 
-  if ask "Remove AI agent guardrails (.cursor/rules, etc.)?"; then
+  if [ "$NON_INTERACTIVE" -eq 1 ] || ask "Remove AI agent guardrails (.cursor/rules, etc.)?"; then
     for dir in .cursor .codex .gemini .windsurf .cline .opencode; do
       if [ -f "$dir/rules" ] && grep -q "Ultimate Bug Scanner" "$dir/rules" 2>/dev/null; then
         sed -i.bak '/# >>> Ultimate Bug Scanner/,/# <<< End Ultimate Bug Scanner/d' "$dir/rules" 2>/dev/null
@@ -1929,15 +1921,19 @@ uninstall_ubs() {
   fi
 
   echo ""
-  if ask "Remove cached modules?"; then
+  if [ "$NON_INTERACTIVE" -eq 1 ] || ask "Remove cached modules?"; then
     local module_dir="${XDG_DATA_HOME:-$HOME/.local/share}/ubs"
     if [ -d "$module_dir" ]; then
-      rm -rf "$module_dir"
-      success "Removed module cache: $module_dir"
+      if [[ -n "$module_dir" && "$module_dir" != "/" ]]; then
+        rm -rf -- "$module_dir"
+        success "Removed module cache: $module_dir"
+      else
+        warn "Refusing to remove module cache path: $module_dir"
+      fi
     fi
   fi
-
-  if ask "Remove configuration file?"; then
+  
+  if [ "$NON_INTERACTIVE" -eq 1 ] || ask "Remove configuration file?"; then
     local config_file="${XDG_CONFIG_HOME:-$HOME/.config}/ubs/install.conf"
     if [ -f "$config_file" ]; then
       rm -f "$config_file"
@@ -3037,7 +3033,7 @@ cat <<'QUICK_REF'
 
 UBS stands for "Ultimate Bug Scanner": **The AI Coding Agent's Secret Weapon: Flagging Likely Bugs for Fixing Early On**
 
-**Install:** `curl -sSL https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/main/install.sh | bash`
+**Install:** `curl -sSL https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh | bash`
 
 **Golden Rule:** `ubs <changed-files>` before every commit. Exit 0 = safe. Exit >0 = fix & re-run.
 

@@ -38,9 +38,10 @@ shopt -s extglob
 # ---------------------------------------------------------------------------
 TMP_FILES=()
 AST_RULE_DIR=""
+AST_CONFIG_FILE=""
 cleanup() {
   local ec=$?
-  if [[ -n "${AST_RULE_DIR:-}" && -d "$AST_RULE_DIR" ]]; then rm -rf "$AST_RULE_DIR" || true; fi
+  if [[ -n "${AST_RULE_DIR:-}" && -d "$AST_RULE_DIR" && "$AST_RULE_DIR" != "/" && "$AST_RULE_DIR" != "." ]]; then rm -rf -- "$AST_RULE_DIR" || true; fi
   if [[ ${#TMP_FILES[@]} -gt 0 ]]; then for f in "${TMP_FILES[@]}"; do [[ -e "$f" ]] && rm -f "$f" || true; done; fi
   exit "$ec"
 }
@@ -193,6 +194,10 @@ if [[ "$NO_COLOR_FLAG" -eq 1 ]]; then USE_COLOR=0; fi
 init_colors
 if [[ "$USE_COLOR" -eq 0 ]]; then export NO_COLOR=1; export CARGO_TERM_COLOR=never; fi
 if [[ -n "${OUTPUT_FILE}" ]]; then mkdir -p "$(dirname -- "$OUTPUT_FILE")" 2>/dev/null || true; exec > >(tee "${OUTPUT_FILE}") 2>&1; fi
+if [[ "$FORMAT" == "json" || "$FORMAT" == "sarif" ]]; then
+  QUIET=1
+  CI_MODE=1
+fi
 
 DATE_FMT='%Y-%m-%d %H:%M:%S'
 now() { if [[ "$CI_MODE" -eq 1 ]]; then date -u '+%Y-%m-%dT%H:%M:%SZ'; else date +"$DATE_FMT"; fi; }
@@ -245,8 +250,7 @@ json_escape() {
   s="${s//"/\\"}"
   s="${s//$'	'/\\t}"
   s="${s//$''/\\r}"
-  s="${s//$'
-'/\\n}"
+  s="${s//$'\n'/\\n}"
   printf '%s' "$s"
 }
 emit_findings_json() {
@@ -277,6 +281,31 @@ emit_findings_json() {
     echo '  ]'
     echo '}'
   } > "$out"
+}
+
+emit_json_summary() {
+  printf '{"project":"%s","files":%s,"critical":%s,"warning":%s,"info":%s,"timestamp":"%s","format":"json"}\n' \
+    "$(json_escape "$PROJECT_DIR")" "$TOTAL_FILES" "$CRITICAL_COUNT" "$WARNING_COUNT" "$INFO_COUNT" "$(json_escape "$(now)")"
+}
+
+emit_sarif() {
+  if [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_CONFIG_FILE" && -f "$AST_CONFIG_FILE" ]]; then
+    local sarif_tmp err_tmp ec=0
+    sarif_tmp="$(mktemp 2>/dev/null || mktemp -t ubs-rust-sarif.XXXXXX)"
+    err_tmp="$(mktemp 2>/dev/null || mktemp -t ubs-rust-sarif-err.XXXXXX)"
+    TMP_FILES+=("$sarif_tmp" "$err_tmp")
+    set +e
+    trap - ERR
+    "${AST_GREP_CMD[@]}" scan -c "$AST_CONFIG_FILE" "$PROJECT_DIR" --format sarif >"$sarif_tmp" 2>"$err_tmp"
+    ec=$?
+    trap on_err ERR
+    set -e
+    if [[ ( $ec -eq 0 || $ec -eq 1 ) && -s "$sarif_tmp" ]]; then
+      cat "$sarif_tmp"
+      return 0
+    fi
+  fi
+  printf '%s\n' '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"ubs-rust"}},"results":[]}]}'
 }
 
 emit_rust_guard_matches() {
@@ -567,7 +596,7 @@ fi
 
 count_lines() { awk 'END{print (NR+0)}'; }
 
-maybe_clear() { if [[ -t 1 && "$CI_MODE" -eq 0 ]]; then clear || true; fi; }
+maybe_clear() { if [[ -t 1 && "$CI_MODE" -eq 0 && "$QUIET" -eq 0 ]]; then clear || true; fi; }
 say() { [[ "$QUIET" -eq 1 ]] && return 0; echo -e "$*"; }
 
 print_header() {
@@ -782,12 +811,21 @@ check_ast_grep() {
     AST_GREP_CMD=(ast-grep)
     HAS_AST_GREP=1
   elif command -v sg >/dev/null 2>&1; then
-    # Avoid Unix sg(1) "switch group" tool collision.
-    if sg --help 2>&1 | grep -q 'Usage: sg group'; then
-      HAS_AST_GREP=0
-    else
+    # Beware: many Unix systems ship a different `sg` (util-linux setgid helper).
+    # Only accept `sg` if it is the ast-grep CLI.
+    local out=""
+    out="$(sg --version 2>&1 || true)"
+    if printf '%s\n' "$out" | grep -qi "ast-grep"; then
       AST_GREP_CMD=(sg)
       HAS_AST_GREP=1
+    else
+      out="$(sg --help 2>&1 || true)"
+      if printf '%s\n' "$out" | grep -qi "ast-grep"; then
+        AST_GREP_CMD=(sg)
+        HAS_AST_GREP=1
+      else
+        HAS_AST_GREP=0
+      fi
     fi
   fi
   if [[ "$HAS_AST_GREP" -eq 1 ]]; then
@@ -848,6 +886,12 @@ write_ast_rules() {
   [[ "$HAS_AST_GREP" -eq 1 ]] || return 0
   # Do NOT clobber the global EXIT trap; cleanup() handles AST_RULE_DIR.
   AST_RULE_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t ag_rules.XXXXXX)"
+  AST_CONFIG_FILE="$(mktemp 2>/dev/null || mktemp -t ubs-rust-sgconfig.XXXXXX)"
+  TMP_FILES+=("$AST_CONFIG_FILE")
+  cat >"$AST_CONFIG_FILE" <<EOF
+ruleDirs:
+  - "$AST_RULE_DIR"
+EOF
   if [[ -n "$USER_RULE_DIR" && -d "$USER_RULE_DIR" ]]; then
     cp -R "$USER_RULE_DIR"/. "$AST_RULE_DIR"/ 2>/dev/null || true
   fi
@@ -1568,9 +1612,17 @@ YAML
 }
 
 run_ast_rules() {
-  [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_RULE_DIR" ]] || return 1
-  local outfmt="--json"; [[ "$FORMAT" == "sarif" ]] && outfmt="--sarif"
-  "${AST_GREP_CMD[@]}" scan -r "$AST_RULE_DIR" "$PROJECT_DIR" $outfmt 2>/dev/null
+  [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_CONFIG_FILE" && -f "$AST_CONFIG_FILE" ]] || return 1
+  local -a outfmt=(--json=stream)
+  [[ "$FORMAT" == "sarif" ]] && outfmt=(--format sarif)
+  local ec=0
+  set +e
+  trap - ERR
+  "${AST_GREP_CMD[@]}" scan -c "$AST_CONFIG_FILE" "$PROJECT_DIR" "${outfmt[@]}" 2>/dev/null
+  ec=$?
+  trap on_err ERR
+  set -e
+  [[ $ec -eq 0 || $ec -eq 1 ]]
 }
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -1622,9 +1674,10 @@ count_warnings_errors() {
 # ────────────────────────────────────────────────────────────────────────────
 # Startup banner
 # ────────────────────────────────────────────────────────────────────────────
-maybe_clear
-echo -e "${BOLD}${CYAN}"
-cat <<'BANNER'
+if [[ "$FORMAT" == "text" && "$QUIET" -eq 0 ]]; then
+  maybe_clear
+  echo -e "${BOLD}${CYAN}"
+  cat <<'BANNER'
 ╔═══════════════════════════════════════════════════════════════════╗ 
 ║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗   ║ 
 ║  ██║   ██║██║  ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝   ║ 
@@ -1658,10 +1711,11 @@ cat <<'BANNER'
 ╚═══════════════════════════════════════════════════════════════════╝ 
                                                                       
 BANNER
-echo -e "${RESET}"
+  echo -e "${RESET}"
 
-say "${WHITE}Project:${RESET}  ${CYAN}$PROJECT_DIR${RESET}"
-say "${WHITE}Started:${RESET}  ${GRAY}$(now)${RESET}"
+  say "${WHITE}Project:${RESET}  ${CYAN}$PROJECT_DIR${RESET}"
+  say "${WHITE}Started:${RESET}  ${GRAY}$(now)${RESET}"
+fi
 
 # Count files
 EX_PRUNE=()
@@ -1681,7 +1735,7 @@ TOTAL_FILES=$(
 say "${WHITE}Files:${RESET}    ${CYAN}$TOTAL_FILES source files (${INCLUDE_EXT})${RESET}"
 
 # Tool detection
-echo ""
+say ""
 if check_ast_grep; then
   say "${GREEN}${CHECK} ast-grep available (${AST_GREP_CMD[*]}) - full AST analysis enabled${RESET}"
   write_ast_rules || true
@@ -2028,7 +2082,7 @@ print_category "Runs: cargo fmt -- --check, cargo clippy" \
 if [[ -n "${UBS_SKIP_RUST_BUILD:-}" ]]; then
 print_finding "info" 0 "Skipped via UBS_SKIP_RUST_BUILD"
 else
-FMT_LOG="$(mktemp)"; CLIPPY_LOG="$(mktemp)"; TMP_FILES+=("$FMT_LOG" "$CLIPPY_LOG")
+FMT_LOG="$(mktemp 2>/dev/null || mktemp -t ubs-rust-fmt.XXXXXX)"; CLIPPY_LOG="$(mktemp 2>/dev/null || mktemp -t ubs-rust-clippy.XXXXXX)"; TMP_FILES+=("$FMT_LOG" "$CLIPPY_LOG")
 if [[ "$RUN_CARGO" -eq 1 && "$HAS_CARGO" -eq 1 ]]; then
   # cargo fmt -- --check
   if [[ "$HAS_FMT" -eq 1 ]]; then
@@ -2073,7 +2127,7 @@ print_category "Runs: cargo check, cargo test --no-run" \
 if [[ -n "${UBS_SKIP_RUST_BUILD:-}" ]]; then
 print_finding "info" 0 "Skipped via UBS_SKIP_RUST_BUILD"
 else
-CHECK_LOG="$(mktemp)"; TEST_LOG="$(mktemp)"; TMP_FILES+=("$CHECK_LOG" "$TEST_LOG")
+CHECK_LOG="$(mktemp 2>/dev/null || mktemp -t ubs-rust-check.XXXXXX)"; TEST_LOG="$(mktemp 2>/dev/null || mktemp -t ubs-rust-test.XXXXXX)"; TMP_FILES+=("$CHECK_LOG" "$TEST_LOG")
 if [[ "$RUN_CARGO" -eq 1 && "$HAS_CARGO" -eq 1 ]]; then
   run_cargo_subcmd "check" "$CHECK_LOG" bash -lc "cd \"$PROJECT_DIR\" && CARGO_TERM_COLOR=${CARGO_TERM_COLOR:-auto} cargo check"
   w_e=$(count_warnings_errors "$CHECK_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
@@ -2088,6 +2142,7 @@ else
   print_finding "info" 1 "cargo disabled/unavailable; build checks skipped"
 fi
 fi
+fi
 
 # ═══════════════════════════════════════════════════════════════════════════
 # CATEGORY 14: DEPENDENCY HYGIENE
@@ -2099,7 +2154,7 @@ print_category "Runs: cargo audit, cargo deny check, cargo udeps, cargo outdated
 
 if [[ "$RUN_CARGO" -eq 1 && "$HAS_CARGO" -eq 1 ]]; then
   if [[ "$HAS_AUDIT" -eq 1 ]]; then
-    AUDIT_LOG="$(mktemp)"; TMP_FILES+=("$AUDIT_LOG"); run_cargo_subcmd "audit" "$AUDIT_LOG" bash -lc "cd \"$PROJECT_DIR\" && CARGO_TERM_COLOR=${CARGO_TERM_COLOR:-auto} cargo audit"
+    AUDIT_LOG="$(mktemp 2>/dev/null || mktemp -t ubs-rust-audit.XXXXXX)"; TMP_FILES+=("$AUDIT_LOG"); run_cargo_subcmd "audit" "$AUDIT_LOG" bash -lc "cd \"$PROJECT_DIR\" && CARGO_TERM_COLOR=${CARGO_TERM_COLOR:-auto} cargo audit"
     audit_vuln=$(grep -c -E "Vulnerability|RUSTSEC" "$AUDIT_LOG" 2>/dev/null || true); audit_vuln=${audit_vuln:-0}
     if [[ "$audit_vuln" -gt 0 ]]; then print_finding "critical" "$audit_vuln" "Advisories found by cargo-audit"; add_finding "critical" "$audit_vuln" "Advisories found by cargo-audit" "" "${CATEGORY_NAME[14]}"; else print_finding "good" "No known advisories (cargo-audit)"; fi
   else
@@ -2107,7 +2162,7 @@ if [[ "$RUN_CARGO" -eq 1 && "$HAS_CARGO" -eq 1 ]]; then
   fi
 
   if [[ "$HAS_DENY" -eq 1 ]]; then
-    DENY_LOG="$(mktemp)"; TMP_FILES+=("$DENY_LOG"); run_cargo_subcmd "deny" "$DENY_LOG" bash -lc "cd \"$PROJECT_DIR\" && CARGO_TERM_COLOR=${CARGO_TERM_COLOR:-auto} cargo deny check advisories bans licenses sources"
+    DENY_LOG="$(mktemp 2>/dev/null || mktemp -t ubs-rust-deny.XXXXXX)"; TMP_FILES+=("$DENY_LOG"); run_cargo_subcmd "deny" "$DENY_LOG" bash -lc "cd \"$PROJECT_DIR\" && CARGO_TERM_COLOR=${CARGO_TERM_COLOR:-auto} cargo deny check advisories bans licenses sources"
     deny_err=$(grep -c -E "error\[[^)]+\]|[[:space:]]error:" "$DENY_LOG" 2>/dev/null || true); deny_err=${deny_err:-0}
     deny_warn=$(grep -c -E "[[:space:]]warning:" "$DENY_LOG" 2>/dev/null || true); deny_warn=${deny_warn:-0}
     if [[ "$deny_err" -gt 0 ]]; then print_finding "critical" "$deny_err" "cargo-deny errors"; add_finding "critical" "$deny_err" "cargo-deny errors" "" "${CATEGORY_NAME[14]}"; fi
@@ -2118,7 +2173,7 @@ if [[ "$RUN_CARGO" -eq 1 && "$HAS_CARGO" -eq 1 ]]; then
   fi
 
   if [[ "$HAS_UDEPS" -eq 1 ]]; then
-    UDEPS_LOG="$(mktemp)"; TMP_FILES+=("$UDEPS_LOG"); run_cargo_subcmd "udeps" "$UDEPS_LOG" bash -lc "cd \"$PROJECT_DIR\" && CARGO_TERM_COLOR=${CARGO_TERM_COLOR:-auto} cargo udeps --all-targets"
+    UDEPS_LOG="$(mktemp 2>/dev/null || mktemp -t ubs-rust-udeps.XXXXXX)"; TMP_FILES+=("$UDEPS_LOG"); run_cargo_subcmd "udeps" "$UDEPS_LOG" bash -lc "cd \"$PROJECT_DIR\" && CARGO_TERM_COLOR=${CARGO_TERM_COLOR:-auto} cargo udeps --all-targets"
     udeps_count=$(grep -c -E "(unused dependency|possibly unused|not used)" "$UDEPS_LOG" 2>/dev/null || true); udeps_count=${udeps_count:-0}
     if [[ "$udeps_count" -gt 0 ]]; then print_finding "info" "$udeps_count" "Unused dependencies (cargo-udeps)"; add_finding "info" "$udeps_count" "Unused dependencies (cargo-udeps)" "" "${CATEGORY_NAME[14]}"; else print_finding "good" "No unused dependencies"; fi
   else
@@ -2126,7 +2181,7 @@ if [[ "$RUN_CARGO" -eq 1 && "$HAS_CARGO" -eq 1 ]]; then
   fi
 
   if [[ "$HAS_OUTDATED" -eq 1 ]]; then
-    OUT_LOG="$(mktemp)"; TMP_FILES+=("$OUT_LOG"); run_cargo_subcmd "outdated" "$OUT_LOG" bash -lc "cd \"$PROJECT_DIR\" && CARGO_TERM_COLOR=${CARGO_TERM_COLOR:-auto} cargo outdated -R"
+    OUT_LOG="$(mktemp 2>/dev/null || mktemp -t ubs-rust-outdated.XXXXXX)"; TMP_FILES+=("$OUT_LOG"); run_cargo_subcmd "outdated" "$OUT_LOG" bash -lc "cd \"$PROJECT_DIR\" && CARGO_TERM_COLOR=${CARGO_TERM_COLOR:-auto} cargo outdated -R"
     outdated_count=$(grep -E -c "Minor|Major|Patch" "$OUT_LOG" 2>/dev/null || true)
     if [[ "$outdated_count" -gt 0 ]]; then print_finding "info" "$outdated_count" "Outdated dependencies (cargo-outdated)"; add_finding "info" "$outdated_count" "Outdated dependencies (cargo-outdated)" "" "${CATEGORY_NAME[14]}"; else print_finding "good" "Dependencies up-to-date"; fi
   else
@@ -2183,14 +2238,10 @@ fi
 # ═══════════════════════════════════════════════════════════════════════════
 # CATEGORY 17: AST-GREP RULE PACK FINDINGS (JSON/SARIF passthrough)
 # ═══════════════════════════════════════════════════════════════════════════
-if category_enabled 17; then
+if category_enabled 17 && [[ "$FORMAT" == "text" ]]; then
 print_header "17. AST-GREP RULE PACK FINDINGS"
-if [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_RULE_DIR" ]]; then
-  run_ast_rules || true
-  say "${DIM}${INFO} Above JSON/SARIF lines are ast-grep matches (id, message, severity, file/pos).${RESET}"
-  if [[ "$FORMAT" == "sarif" ]]; then
-    say "${DIM}Tip: ${BOLD}${AST_GREP_CMD[*]} scan -r $AST_RULE_DIR \"$PROJECT_DIR\" --sarif > report.sarif${RESET}"
-  fi
+if [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_CONFIG_FILE" ]]; then
+  print_finding "info" 0 "AST rule pack staged" "Run with --format=sarif to emit SARIF from the rule pack"
 else
   say "${YELLOW}${WARN} ast-grep scan subcommand unavailable; rule-pack mode skipped.${RESET}"
 fi
@@ -2392,6 +2443,7 @@ end_scan_section
 # ═══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ═══════════════════════════════════════════════════════════════════════════
+if [[ "$FORMAT" == "text" ]]; then
 echo ""
 say "${BOLD}${WHITE}═══════════════════════════════════════════════════════════════════════════${RESET}"
 say "${BOLD}${CYAN}                    🎯 SCAN COMPLETE 🎯                                  ${RESET}"
@@ -2401,7 +2453,7 @@ echo ""
 say "${WHITE}${BOLD}Summary Statistics:${RESET}"
 say "  ${WHITE}Files scanned:${RESET}    ${CYAN}$TOTAL_FILES${RESET}"
 say "  ${RED}${BOLD}Critical issues:${RESET}  ${RED}$CRITICAL_COUNT${RESET}"
-say "  ${YELLOW}Warning issues:${RESET}   ${YELLOW}$WARNING_COUNT${RESET}
+say "  ${YELLOW}Warning issues:${RESET}   ${YELLOW}$WARNING_COUNT${RESET}"
 say "  ${BLUE}Info items:${RESET}       ${BLUE}$INFO_COUNT${RESET}"
 echo ""
 
@@ -2416,7 +2468,7 @@ if [ "$WARNING_COUNT" -gt 0 ]; then
 fi
 if [ "$INFO_COUNT" -gt 0 ]; then
   say "  ${BLUE}${INFO} ${BOLD}Consider INFO suggestions${RESET}"
-  say "  ${DIM}Code quality improvements and best practices${RESET}
+  say "  ${DIM}Code quality improvements and best practices${RESET}"
 fi
 
 if [ "$CRITICAL_COUNT" -eq 0 ] && [ "$WARNING_COUNT" -eq 0 ]; then
@@ -2431,7 +2483,7 @@ if [[ -n "$OUTPUT_FILE" ]]; then
 fi
 
 if [[ "$FORMAT" == "json" ]]; then
-  TMP_JSON="$(mktemp)"; TMP_FILES+=("$TMP_JSON")
+  TMP_JSON="$(mktemp 2>/dev/null || mktemp -t ubs-rust-result.XXXXXX)"; TMP_FILES+=("$TMP_JSON")
   emit_findings_json "$TMP_JSON"
   cat "$TMP_JSON"
 fi
@@ -2442,6 +2494,7 @@ if [ "$VERBOSE" -eq 0 ]; then
 fi
 say "${DIM}Add to CI: ./ubs --ci --fail-on-warning . > rust-bug-scan.txt${RESET}"
 echo ""
+fi
 
 if [[ -n "$SUMMARY_JSON" ]]; then
   cat >"$SUMMARY_JSON" <<JSON
@@ -2465,4 +2518,12 @@ EXIT_CODE=0
 if (( CRITICAL_COUNT >= FAIL_CRITICAL_THRESHOLD )); then EXIT_CODE=1; fi
 if (( FAIL_ON_WARNING == 1 )) && (( CRITICAL_COUNT + WARNING_COUNT > 0 )); then EXIT_CODE=1; fi
 if (( FAIL_WARNING_THRESHOLD > 0 )) && (( WARNING_COUNT >= FAIL_WARNING_THRESHOLD )); then EXIT_CODE=1; fi
+if [[ "$FORMAT" == "json" ]]; then
+  emit_json_summary
+  exit "$EXIT_CODE"
+fi
+if [[ "$FORMAT" == "sarif" ]]; then
+  emit_sarif
+  exit "$EXIT_CODE"
+fi
 exit "$EXIT_CODE"

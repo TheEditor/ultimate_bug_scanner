@@ -171,14 +171,12 @@ def main() -> int:
     root = Path(sys.argv[1]).resolve()
     if not root.exists():
         return 0
-    any_output = False
     for path in iter_kotlin_files(root):
         try:
             issues = analyze_file(path)
         except OSError:
             continue
         for line, col, message in issues:
-            any_output = True
             print(f"{path}:{line}:{col}\t{message}")
     return 0
 

@@ -71,6 +71,7 @@ USER_RULE_DIR=""
 DISABLE_PIPEFAIL_DURING_SCAN=1
 AST_RULE_RESULTS_JSON=""
 AST_RULE_DIR=""
+AST_RULE_CONFIG=""
 
 # Async error coverage spec (rule ids -> metadata)
 ASYNC_ERROR_RULE_IDS=(js.async.then-no-catch js.async.promiseall-no-try js.async.await-no-try js.async.dangling-promise)
@@ -178,8 +179,11 @@ cleanup_temp_artifacts(){
   if [[ -n "$AST_RULE_RESULTS_JSON" && -f "$AST_RULE_RESULTS_JSON" ]]; then
     rm -f "$AST_RULE_RESULTS_JSON"
   fi
-  if [[ -n "$AST_RULE_DIR" && -d "$AST_RULE_DIR" ]]; then
-    rm -rf "$AST_RULE_DIR"
+  if [[ -n "$AST_RULE_CONFIG" && -f "$AST_RULE_CONFIG" ]]; then
+    rm -f "$AST_RULE_CONFIG"
+  fi
+  if [[ -n "$AST_RULE_DIR" && -d "$AST_RULE_DIR" && "$AST_RULE_DIR" != "/" && "$AST_RULE_DIR" != "." ]]; then
+    rm -rf -- "$AST_RULE_DIR"
   fi
 }
 trap cleanup_temp_artifacts EXIT
@@ -260,7 +264,20 @@ fi
 if [[ -n "${OUTPUT_FILE}" ]]; then exec > >(tee "${OUTPUT_FILE}") 2>&1; fi
 
 DATE_FMT='%Y-%m-%d %H:%M:%S'
-if [[ "$CI_MODE" -eq 1 ]]; then DATE_CMD="date -u '+%Y-%m-%dT%H:%M:%SZ'"; else DATE_CMD="date '+$DATE_FMT'"; fi
+safe_date() {
+  if [[ "$CI_MODE" -eq 1 ]]; then
+    command date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || command date '+%Y-%m-%dT%H:%M:%SZ'
+  else
+    command date "+$DATE_FMT"
+  fi
+}
+
+# Machine-readable formats: keep stdout clean and send logs to stderr.
+# We retain a handle to the original stdout so we can emit the final JSON/SARIF.
+if [[ "$FORMAT" == "json" || "$FORMAT" == "sarif" ]]; then
+  exec 3>&1
+  exec 1>&2
+fi
 
 # ────────────────────────────────────────────────────────────────────────────
 # Global Counters
@@ -297,6 +314,29 @@ for d in "${EXCLUDE_DIRS[@]}"; do
   fi
 done
 
+# ast-grep file filtering: include only configured JS/TS extensions and exclude
+# known large/vendor directories. (Without this, multi-language ast-grep patterns
+# can match other languages like Python in monorepos.)
+AST_GREP_GLOBS=()
+for e in "${_EXT_ARR[@]}"; do
+  ext="$(echo "$e" | xargs)"
+  [[ -z "$ext" ]] && continue
+  AST_GREP_GLOBS+=( --globs "*.${ext}" )
+done
+# Excludes are appended after includes so they take precedence.
+for d in "${EXCLUDE_DIRS[@]}"; do
+  [[ -z "$d" ]] && continue
+  if [[ "$d" == *"*"* || "$d" == *"?"* || "$d" == *"["* ]]; then
+    AST_GREP_GLOBS+=( --globs "!$d" )
+  else
+    AST_GREP_GLOBS+=( --globs "!$d/**" )
+  fi
+done
+for g in "${EXCLUDE_GLOBS[@]}"; do
+  [[ -z "$g" ]] && continue
+  AST_GREP_GLOBS+=( --globs "!$g" )
+done
+
 if command -v rg >/dev/null 2>&1; then
   if [[ "${JOBS}" -eq 0 ]]; then JOBS="$( (command -v nproc >/dev/null && nproc) || sysctl -n hw.ncpu 2>/dev/null || echo 0 )"; fi
   RG_JOBS=(); if [[ "${JOBS}" -gt 0 ]]; then RG_JOBS=(-j "$JOBS"); fi
@@ -319,6 +359,17 @@ fi
 
 # Helper: robust numeric end-of-pipeline counter; never emits 0\n0
 count_lines() { awk 'END{print (NR+0)}'; }
+
+# Escape a string for JSON (minimal; mirrors ubs runner).
+json_escape(){
+  local s="${1:-}"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
 
 # ────────────────────────────────────────────────────────────────────────────
 # Helper Functions
@@ -501,7 +552,6 @@ with open(rule_file, 'r', encoding='utf-8') as fh:
                            (0 <= idx - 1 < len(slines) and 'ubs:ignore' in slines[idx - 1]):
                             continue
                 except Exception as e:
-                    sys.stderr.write(f"DEBUG: Failed to open {f}: {e}\n")
                     pass
         sample = f"{f}:{sline if sline is not None else '?'}"
         ent = stats.setdefault(rid, {'count': 0, 'samples': []})
@@ -537,8 +587,10 @@ PY
 
 print_code_sample() {
   local file=$1; local line=$2; local code=$3
-  say "${GRAY}      $file:$line${RESET}"
-  say "${WHITE}      $code${RESET}"
+  [[ "$QUIET" -eq 1 ]] && return 0
+  # Use printf to avoid echo -e interpreting user code (e.g., "-n", "\t", "\c")
+  printf '%b%s%b\n' "$GRAY" "      $file:$line" "$RESET"
+  printf '%b%s%b\n' "$WHITE" "      $code" "$RESET"
 }
 
 # Parse grep/rg output line handling Windows drive letters (C:/path...)
@@ -588,7 +640,7 @@ show_ast_detailed_patterns() {
       print_code_sample "$PARSED_FILE" "$PARSED_LINE" "$PARSED_CODE"
       printed=$((printed + 1))
       [[ $printed -ge $limit || $printed -ge $MAX_DETAILED ]] && return 0
-    done < <(( set +o pipefail; "${AST_GREP_CMD[@]}" --pattern "$pattern" "$PROJECT_DIR" 2>/dev/null || true ) | head -n "$limit" || true) || true
+    done < <(( set +o pipefail; ast_grep_project --pattern "$pattern" 2>/dev/null || true ) | head -n "$limit" || true) || true
   done
 }
 
@@ -820,11 +872,11 @@ YAML
   : >"$tmp_json"
   local rf
   for rf in "$rule_dir"/*.yml; do
-    if ! "${AST_GREP_CMD[@]}" scan -r "$rf" "$PROJECT_DIR" --json=stream >>"$tmp_json" 2>/dev/null; then
+    if ! ast_grep_project scan -r "$rf" --json=stream >>"$tmp_json" 2>/dev/null; then
       continue
     fi
   done
-  rm -rf "$rule_dir"
+  [[ -n "$rule_dir" && "$rule_dir" != "/" && "$rule_dir" != "." ]] && rm -rf -- "$rule_dir" 2>/dev/null || true
   if ! [[ -s "$tmp_json" ]]; then
     rm -f "$tmp_json"
     print_finding "good" "Hooks dependency arrays look accurate"
@@ -1630,11 +1682,16 @@ check_ast_grep() {
   HAS_AST_GREP=0; return 1
 }
 
+ast_grep_project() {
+  [[ "$HAS_AST_GREP" -eq 1 ]] || return 1
+  "${AST_GREP_CMD[@]}" "$@" "${AST_GREP_GLOBS[@]}" "$PROJECT_DIR"
+}
+
 ast_search() {
   local pattern=$1
   if [[ "$HAS_AST_GREP" -eq 1 ]]; then
     # Count matches via JSON stream to avoid multi-line match inflation.
-    ( set +o pipefail; "${AST_GREP_CMD[@]}" --pattern "$pattern" "$PROJECT_DIR" --json=stream 2>/dev/null || true ) | count_lines
+    ( set +o pipefail; ast_grep_project --pattern "$pattern" --json=stream 2>/dev/null || true ) | count_lines
   else
     return 1
   fi
@@ -1643,7 +1700,7 @@ ast_search() {
 ast_search_with_context() {
   local pattern=$1; local limit=${2:-$DETAIL_LIMIT}
   if [[ "$HAS_AST_GREP" -eq 1 ]]; then
-    ( set +o pipefail; "${AST_GREP_CMD[@]}" --pattern "$pattern" "$PROJECT_DIR" --json 2>/dev/null || true ) \
+    ( set +o pipefail; ast_grep_project --pattern "$pattern" --json 2>/dev/null || true ) \
       | head -n "$limit" || true
   fi
 }
@@ -1658,8 +1715,8 @@ analyze_deep_property_guards() {
   tmp_props="$(mktemp -t ubs-deep-props.XXXXXX 2>/dev/null || mktemp -t ubs-deep-props)"
   tmp_ifs="$(mktemp -t ubs-if-guards.XXXXXX 2>/dev/null || mktemp -t ubs-if-guards)"
 
-  ( set +o pipefail; "${AST_GREP_CMD[@]}" --pattern '$OBJ.$P1.$P2.$P3' "$PROJECT_DIR" --json=stream 2>/dev/null || true ) >"$tmp_props"
-  ( set +o pipefail; "${AST_GREP_CMD[@]}" --pattern 'if ($COND) $BODY' "$PROJECT_DIR" --json=stream 2>/dev/null || true ) >"$tmp_ifs"
+  ( set +o pipefail; ast_grep_project --pattern '$OBJ.$P1.$P2.$P3' --json=stream 2>/dev/null || true ) >"$tmp_props"
+  ( set +o pipefail; ast_grep_project --pattern 'if ($COND) $BODY' --json=stream 2>/dev/null || true ) >"$tmp_ifs"
 
   result=$(python3 - "$tmp_props" "$tmp_ifs" "$limit" <<'PY'
 import json, sys
@@ -1790,6 +1847,11 @@ persist_metric_json() {
 write_ast_rules() {
   [[ "$HAS_AST_GREP" -eq 1 ]] || return 0
   AST_RULE_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t ag_rules.XXXXXX)"
+  AST_RULE_CONFIG="$(mktemp 2>/dev/null || mktemp -t ubs-js-sgconfig.XXXXXX)"
+  cat >"$AST_RULE_CONFIG" <<YAML
+ruleDirs:
+  - "$AST_RULE_DIR"
+YAML
   if [[ -n "$USER_RULE_DIR" && -d "$USER_RULE_DIR" ]]; then
     cp -R "$USER_RULE_DIR"/. "$AST_RULE_DIR"/ 2>/dev/null || true
   fi
@@ -2161,8 +2223,12 @@ ensure_ast_rule_results() {
   rc=0
   shopt -s nullglob
   for rule_file in "$AST_RULE_DIR"/*.yml; do
-    "${AST_GREP_CMD[@]}" scan --rule "$rule_file" "$PROJECT_DIR" --json=stream >>"$tmp_json" 2>/dev/null
-    cmd_rc=$?
+    local cmd_rc=0
+    if ast_grep_project scan --rule "$rule_file" --json=stream >>"$tmp_json" 2>/dev/null; then
+      cmd_rc=0
+    else
+      cmd_rc=$?
+    fi
     if [[ "$cmd_rc" -gt 1 ]]; then
       rc=$cmd_rc
       break
@@ -2180,11 +2246,9 @@ ensure_ast_rule_results() {
 run_ast_rules() {
   [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_RULE_DIR" ]] || return 1
   if [[ "$FORMAT" == "sarif" ]]; then
-    if "${AST_GREP_CMD[@]}" scan -r "$AST_RULE_DIR" "$PROJECT_DIR" --sarif 2>/dev/null; then
-      return 0
-    else
-      return 1
-    fi
+    [[ -n "$AST_RULE_CONFIG" && -f "$AST_RULE_CONFIG" ]] || return 1
+    ast_grep_project scan -c "$AST_RULE_CONFIG" --format sarif 2>/dev/null
+    return $?
   fi
   if ! ensure_ast_rule_results; then
     return 1
@@ -2250,7 +2314,7 @@ BANNER
 echo -e "${RESET}"
 
 say "${WHITE}Project:${RESET}  ${CYAN}$PROJECT_DIR${RESET}"
-say "${WHITE}Started:${RESET}  ${GRAY}$(eval "$DATE_CMD")${RESET}"
+say "${WHITE}Started:${RESET}  ${GRAY}$(safe_date)${RESET}"
 
 # Count files (robust find; no dangling -o, no -false hacks)
 EX_PRUNE=()
@@ -2309,6 +2373,51 @@ else
   fi
 
   say "${YELLOW}${WARN} ast-grep unavailable - using regex fallback mode${RESET}"
+fi
+
+# In SARIF mode we only emit ast-grep rule-pack results (machine output) and exit.
+if [[ "$FORMAT" == "sarif" ]]; then
+  if [[ "$HAS_AST_GREP" -ne 1 || -z "$AST_RULE_CONFIG" || ! -f "$AST_RULE_CONFIG" ]]; then
+    say "${RED}${BOLD}${CROSS} Environment error: ast-grep rule pack unavailable for SARIF output${RESET}"
+    exit 2
+  fi
+
+  sarif_tmp="$(mktemp 2>/dev/null || mktemp -t ubs-js.sarif.XXXXXX)"
+  code=0
+  if ast_grep_project scan -c "$AST_RULE_CONFIG" --format sarif >"$sarif_tmp" 2>/dev/null; then
+    code=0
+  else
+    code=$?
+  fi
+
+  # `ast-grep scan` returns exit 1 when error-level diagnostics are found.
+  # Treat that as a successful scan so UBS can still parse findings.
+  if [[ "$code" -ne 0 && "$code" -ne 1 ]]; then
+    say "${RED}${BOLD}${CROSS} Environment error: failed to produce SARIF via ast-grep${RESET}"
+    exit 2
+  fi
+
+  critical=0
+  warning=0
+  if command -v jq >/dev/null 2>&1; then
+    critical=$(jq '[.runs[]?.results[]? | select((.level // "warning") == "error")] | length' "$sarif_tmp" 2>/dev/null || echo 0)
+    warning=$(jq '[.runs[]?.results[]? | select((.level // "warning") == "warning")] | length' "$sarif_tmp" 2>/dev/null || echo 0)
+  else
+    critical=$(grep -Eo '"level":[[:space:]]*"error"' "$sarif_tmp" 2>/dev/null | wc -l | awk '{print $1+0}')
+    warning=$(grep -Eo '"level":[[:space:]]*"warning"' "$sarif_tmp" 2>/dev/null | wc -l | awk '{print $1+0}')
+  fi
+  critical=${critical:-0}
+  warning=${warning:-0}
+
+  exit_code=0
+  if [[ "$FAIL_ON_WARNING" -eq 1 && $((critical + warning)) -gt 0 ]]; then
+    exit_code=1
+  elif [[ "$FAIL_ON_WARNING" -eq 0 && "$critical" -gt 0 ]]; then
+    exit_code=1
+  fi
+
+  cat "$sarif_tmp" >&3
+  exit "$exit_code"
 fi
 
 # relax pipefail for scanning (optional)
@@ -2584,20 +2693,20 @@ print_subheader "typeof checks with wrong string literals"
 count=0
 typeof_samples=""
 if [[ "$HAS_AST_GREP" -eq 1 ]] && command -v python3 >/dev/null 2>&1; then
-  typeof_report=$(
-    (
-      set +o pipefail
-      "${AST_GREP_CMD[@]}" --pattern 'typeof $X === $Y' "$PROJECT_DIR" --json=stream 2>/dev/null || true
-      "${AST_GREP_CMD[@]}" --pattern 'typeof $X == $Y'  "$PROJECT_DIR" --json=stream 2>/dev/null || true
-      "${AST_GREP_CMD[@]}" --pattern 'typeof $X !== $Y' "$PROJECT_DIR" --json=stream 2>/dev/null || true
-      "${AST_GREP_CMD[@]}" --pattern 'typeof $X != $Y'  "$PROJECT_DIR" --json=stream 2>/dev/null || true
-      "${AST_GREP_CMD[@]}" --pattern '$Y === typeof $X' "$PROJECT_DIR" --json=stream 2>/dev/null || true
-      "${AST_GREP_CMD[@]}" --pattern '$Y == typeof $X'  "$PROJECT_DIR" --json=stream 2>/dev/null || true
-      "${AST_GREP_CMD[@]}" --pattern '$Y !== typeof $X' "$PROJECT_DIR" --json=stream 2>/dev/null || true
-      "${AST_GREP_CMD[@]}" --pattern '$Y != typeof $X'  "$PROJECT_DIR" --json=stream 2>/dev/null || true
-    ) | python3 -c "$(cat <<'PY'
-import json
-import sys
+	  typeof_report=$(
+	    (
+	      set +o pipefail
+	      ast_grep_project --pattern 'typeof $X === $Y' --json=stream 2>/dev/null || true
+	      ast_grep_project --pattern 'typeof $X == $Y'  --json=stream 2>/dev/null || true
+	      ast_grep_project --pattern 'typeof $X !== $Y' --json=stream 2>/dev/null || true
+	      ast_grep_project --pattern 'typeof $X != $Y'  --json=stream 2>/dev/null || true
+	      ast_grep_project --pattern '$Y === typeof $X' --json=stream 2>/dev/null || true
+	      ast_grep_project --pattern '$Y == typeof $X'  --json=stream 2>/dev/null || true
+	      ast_grep_project --pattern '$Y !== typeof $X' --json=stream 2>/dev/null || true
+	      ast_grep_project --pattern '$Y != typeof $X'  --json=stream 2>/dev/null || true
+	    ) | python3 -c "$(cat <<'PY'
+	import json
+	import sys
 
 limit = int(sys.argv[1]) if len(sys.argv) > 1 else 3
 valid = {"undefined", "string", "number", "boolean", "function", "object", "symbol", "bigint"}
@@ -2748,7 +2857,7 @@ print_subheader "eval() usage (CRITICAL SECURITY RISK)"
 eval_count=$( \
   ( \
     if [[ "$HAS_AST_GREP" -eq 1 ]]; then
-      ( set +o pipefail; "${AST_GREP_CMD[@]}" --pattern 'eval($$$)' "$PROJECT_DIR" 2>/dev/null || true )
+      ( set +o pipefail; ast_grep_project --pattern 'eval($$$)' 2>/dev/null || true )
     else
       "${GREP_RN[@]}" -e "(^|[^\"'])[Ee]val[[:space:]]*\\(" "$PROJECT_DIR" 2>/dev/null || true
     fi
@@ -2766,7 +2875,7 @@ fi
 print_subheader "new Function() (eval equivalent)"
 count=$( \
   ( \
-    ( [[ "$HAS_AST_GREP" -eq 1 ]] && ( set +o pipefail; "${AST_GREP_CMD[@]}" --pattern 'new Function($$$)' "$PROJECT_DIR" 2>/dev/null ) ) \
+    ( [[ "$HAS_AST_GREP" -eq 1 ]] && ( set +o pipefail; ast_grep_project --pattern 'new Function($$$)' 2>/dev/null ) ) \
     || ( "${GREP_RN[@]}" -e "(^|[^\"'])\\bnew[[:space:]]+Function[[:space:]]*\\(" "$PROJECT_DIR" 2>/dev/null || true ) \
   ) \
   | (grep -Ev "^[[:space:]]*(//|/\*|\*)" || true) \
@@ -2780,7 +2889,7 @@ fi
 print_subheader "innerHTML with potential XSS risk"
 count=$( \
   ( \
-    ( [[ "$HAS_AST_GREP" -eq 1 ]] && "${AST_GREP_CMD[@]}" --pattern '$EL.innerHTML = $VAL' "$PROJECT_DIR" 2>/dev/null ) \
+    ( [[ "$HAS_AST_GREP" -eq 1 ]] && ast_grep_project --pattern '$EL.innerHTML = $VAL' 2>/dev/null ) \
     || "${GREP_RN[@]}" -e "\.innerHTML[[:space:]]*=" "$PROJECT_DIR" 2>/dev/null \
   ) \
      | (grep -v -E "escapeHtml|sanitize|DOMPurify" || true) \
@@ -2797,7 +2906,7 @@ fi
 print_subheader "document.write (deprecated & dangerous)"
 count=$( \
   ( \
-    ( [[ "$HAS_AST_GREP" -eq 1 ]] && "${AST_GREP_CMD[@]}" --pattern "document.write($$$)" "$PROJECT_DIR" 2>/dev/null ) \
+    ( [[ "$HAS_AST_GREP" -eq 1 ]] && ast_grep_project --pattern "document.write($$$)" 2>/dev/null ) \
     || "${GREP_RNW[@]}" "document\.write" "$PROJECT_DIR" 2>/dev/null \
   ) \
      | (grep -Ev "^[[:space:]]*(//|/\*|\*)" || true) \
@@ -3616,9 +3725,6 @@ if [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_RULE_DIR" ]]; then
   print_header "AST-GREP RULE PACK FINDINGS"
   if run_ast_rules; then
     say "${DIM}${INFO} Above JSON/SARIF lines are ast-grep matches (id, message, severity, file/pos).${RESET}"
-    if [[ "$FORMAT" == "sarif" ]]; then
-      say "${DIM}${INFO} Tip: ${BOLD}${AST_GREP_CMD[*]} scan -r $AST_RULE_DIR \"$PROJECT_DIR\" --sarif > report.sarif${RESET}"
-    fi
   else
     say "${YELLOW}${WARN} ast-grep scan subcommand unavailable; rule-pack mode skipped.${RESET}"
   fi
@@ -3681,7 +3787,7 @@ if [ "$CRITICAL_COUNT" -eq 0 ] && [ "$WARNING_COUNT" -eq 0 ]; then
 fi
 
 echo ""
-say "${DIM}Scan completed at: $(eval "$DATE_CMD")${RESET}"
+say "${DIM}Scan completed at: $(safe_date)${RESET}"
 
 if [[ -n "$OUTPUT_FILE" ]]; then
   say "${GREEN}${CHECK} Full report saved to: ${CYAN}$OUTPUT_FILE${RESET}"
@@ -3700,4 +3806,13 @@ echo ""
 EXIT_CODE=0
 if [ "$CRITICAL_COUNT" -gt 0 ]; then EXIT_CODE=1; fi
 if [ "$FAIL_ON_WARNING" -eq 1 ] && [ $((CRITICAL_COUNT + WARNING_COUNT)) -gt 0 ]; then EXIT_CODE=1; fi
+
+if [[ "$FORMAT" == "json" ]]; then
+  proj_json="$(json_escape "$PROJECT_DIR")"
+  ts_json="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%SZ')"
+  ver_json="$(json_escape "$UBS_VERSION")"
+  printf '{"project":"%s","timestamp":"%s","files":%d,"critical":%d,"warning":%d,"info":%d,"version":"%s"}\n' \
+    "$proj_json" "$ts_json" "$TOTAL_FILES" "$CRITICAL_COUNT" "$WARNING_COUNT" "$INFO_COUNT" "$ver_json" >&3
+  exit "$EXIT_CODE"
+fi
 exit "$EXIT_CODE"

@@ -15,7 +15,6 @@ SKIP_DIRS = {"target", ".git", ".hg", ".svn", "node_modules"}
 UNWRAP_PATTERN = r"\b{name}\s*\.(?:unwrap|expect)\s*\("
 ASSIGN_PATTERN = r"\b{name}\s*="
 IDENT_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-BASE_DIR = Path.cwd().resolve()
 
 
 @dataclass(frozen=True)
@@ -26,9 +25,9 @@ class GuardMatch:
     end: int
 
 
-def is_safe_path(path: Path) -> bool:
+def is_safe_path(path: Path, base: Path) -> bool:
     try:
-        path.resolve().relative_to(BASE_DIR)
+        path.resolve().relative_to(base)
         return True
     except ValueError:
         return False
@@ -59,8 +58,7 @@ def line_col(text: str, pos: int) -> tuple[int, int]:
 
 
 def iter_rust_files(root: Path) -> Iterable[Path]:
-    if not is_safe_path(root):
-        return
+    base = root.resolve()
     if root.is_file():
         if root.suffix == ".rs" and not any(part in SKIP_DIRS for part in root.parts):
             yield root
@@ -69,11 +67,11 @@ def iter_rust_files(root: Path) -> Iterable[Path]:
     for dirpath, dirnames, filenames in os.walk(root):
         # Modify dirnames in-place to prune traversal
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-        
+
         for filename in filenames:
             if filename.endswith(".rs"):
                 path = Path(dirpath) / filename
-                if is_safe_path(path):
+                if is_safe_path(path, base):
                     yield path
 
 
@@ -108,13 +106,12 @@ def guard_from_match(entry: dict) -> GuardMatch | None:
     file_path = entry.get("file")
     if start is None or end is None or not file_path:
         return None
-    guard_path = Path(file_path).resolve()
-    return GuardMatch(guard_path, expr, int(start), int(end))
+    return GuardMatch(Path(file_path), expr, int(start), int(end))
 
 
 def analyze_with_ast_json(root: Path, json_path: Path) -> List[tuple[Path, int, int, str]]:
-    if not is_safe_path(root):
-        return []
+    base = root.resolve()
+    base_dir = base if base.is_dir() else base.parent
     if not json_path.exists():
         return []
     guards: List[GuardMatch] = []
@@ -128,7 +125,15 @@ def analyze_with_ast_json(root: Path, json_path: Path) -> List[tuple[Path, int, 
                 if match is None:
                     continue
                 guard = guard_from_match(match)
-                if guard and is_safe_path(guard.path):
+                if not guard:
+                    continue
+                guard_path = guard.path
+                if not guard_path.is_absolute():
+                    guard_path = (base_dir / guard_path).resolve()
+                else:
+                    guard_path = guard_path.resolve()
+                guard = GuardMatch(guard_path, guard.expr, guard.start, guard.end)
+                if is_safe_path(guard.path, base_dir):
                     guards.append(guard)
     except OSError:
         return []

@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 import sys
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 TARGET_SIGS: dict[tuple[Optional[str], str], str] = {
     (None, "open"): "file_handle",
@@ -220,35 +220,61 @@ class Analyzer(ast.NodeVisitor):
 
     def visit_Await(self, node: ast.Await) -> None:
         if isinstance(node.value, ast.Name):
-            self._mark_released(node.value.id, "asyncio_task")
+            self._mark_released(node.value.id, "asyncio_task", check_all_scopes=True)
+        elif isinstance(node.value, ast.Call):
+            sig = self._call_signature(node.value)
+            if sig and TARGET_SIGS.get(sig) == "asyncio_task":
+                # `await asyncio.create_task(...)` is effectively a task "release"
+                # since the awaited expression is observed to completion.
+                self.safe_calls.add(id(node.value))
         self.generic_visit(node)
 
     def _handle_release(self, node: ast.Call) -> None:
         func = node.func
         if isinstance(func, ast.Attribute):
+            # Handle chained resource acquisition + cleanup, e.g.:
+            #   open … close
+            #   socket.socket … close
+            #   subprocess.Popen … wait
+            #   asyncio.create_task … cancel
+            if isinstance(func.value, ast.Call):
+                base_sig = self._call_signature(func.value)
+                if base_sig:
+                    base_kind = TARGET_SIGS.get(base_sig)
+                    if base_kind and func.attr in RELEASE_METHODS.get(base_kind, set()):
+                        self.safe_calls.add(id(func.value))
             name = self._dotted_name(func.value)
             method = func.attr
             for kind, methods in RELEASE_METHODS.items():
                 if method in methods:
-                    self._mark_released(name, kind)
+                    self._mark_released(name, kind, check_all_scopes=True)
                     break
 
         sig = self._call_signature(node)
         if sig in TASK_RELEASE_SIGS:
-            for arg_name in self._iter_task_args(node.args):
-                self._mark_released(arg_name, "asyncio_task")
+            for arg in node.args:
+                self._mark_task_released_from_expr(arg)
             for kw in node.keywords:
                 if kw.value is not None:
-                    for arg_name in self._iter_task_args([kw.value]):
-                        self._mark_released(arg_name, "asyncio_task")
+                    self._mark_task_released_from_expr(kw.value)
 
-    def _iter_task_args(self, args: Iterable[ast.AST]) -> Iterable[str]:
-        for arg in args:
-            if isinstance(arg, ast.Name):
-                yield arg.id
-            elif isinstance(arg, (ast.Tuple, ast.List, ast.Set)):
-                for elt in arg.elts:
-                    yield from self._iter_task_args([elt])
+    def _mark_task_released_from_expr(self, expr: ast.AST) -> None:
+        if isinstance(expr, ast.Name):
+            self._mark_released(expr.id, "asyncio_task", check_all_scopes=True)
+            return
+        if isinstance(expr, ast.Call):
+            sig = self._call_signature(expr)
+            if sig and TARGET_SIGS.get(sig) == "asyncio_task":
+                # asyncio.gather(asyncio.create_task(...)) is effectively awaited/managed
+                # via the gather/wait primitive.
+                self.safe_calls.add(id(expr))
+            return
+        if isinstance(expr, ast.Starred):
+            self._mark_task_released_from_expr(expr.value)
+            return
+        if isinstance(expr, (ast.Tuple, ast.List, ast.Set)):
+            for elt in expr.elts:
+                self._mark_task_released_from_expr(elt)
 
     # Helpers ------------------------------------------------------------
     def _mark_released(self, name: Optional[str], kind: Optional[str], check_all_scopes: bool = False) -> None:
@@ -261,14 +287,11 @@ class Analyzer(ast.NodeVisitor):
             entries = scope.by_name.get(name)
             if not entries:
                 continue
-            for rec in entries:
+            # When a variable is reassigned (e.g., `f = open_handle(...); f = open_handle(...); f.close()`),
+            # the close() applies to the most recent acquisition bound to that name.
+            for rec in reversed(entries):
                 if not rec.released and (kind is None or rec.kind == kind):
                     rec.released = True
-                    # If we released one, we assume we released the most relevant one.
-                    # Should we keep searching other scopes? 
-                    # If I return f, I release the local f. If f captured outer f, it releases that too?
-                    # Python variables are refs. If I return f, the object is passed.
-                    # The lifecycle responsibility transfers. So yes, mark it released.
                     return
 
     def _add_record(self, name: Optional[str], kind: str, lineno: int) -> None:
@@ -294,21 +317,6 @@ class Analyzer(ast.NodeVisitor):
             attr = func.attr
             if isinstance(base, ast.Name):
                 module, obj = self._lookup_alias(base.id)
-                # If base.id is not aliased, it might be a module name or object
-                if obj:
-                    module = module or obj
-                else:
-                    # e.g. os.path.join -> base.id="os"
-                    # _lookup_alias("os") -> (None, None) usually if just imported
-                    # Wait: for "import os", alias == "os" -> ("os", None)
-                    pass
-                
-                # If we didn't find an alias, check if it matches a known structure
-                if not module and not obj:
-                     # Check if we have an alias that matches base.id
-                     # (handled by _lookup_alias returning (None,None))
-                     pass
-
                 return (module or base.id, attr)
             if isinstance(base, ast.Attribute):
                 dotted = self._dotted_name(base)

@@ -7,11 +7,13 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 # Ensure we are in the root
 cd "$ROOT_DIR"
 
-if command -v uv >/dev/null 2>&1; then
-    uv run python scripts/update_checksums.py
-elif [[ -f ".venv/bin/python3" ]]; then
-    .venv/bin/python3 scripts/update_checksums.py
+if [[ -x ".venv/bin/python3" ]]; then
+    # Prefer an existing project venv if present (avoids uv re-creating it).
+    PYTHONDONTWRITEBYTECODE=1 .venv/bin/python3 scripts/update_checksums.py
+elif command -v uv >/dev/null 2>&1; then
+    # Run without discovering the project/workspace so uv doesn't create or mutate
+    # the repo-local `.venv` while we're just updating pinned checksums.
+    PYTHONDONTWRITEBYTECODE=1 uv run --no-project --script scripts/update_checksums.py
 else
-    python3 scripts/update_checksums.py
+    PYTHONDONTWRITEBYTECODE=1 python3 scripts/update_checksums.py
 fi
-

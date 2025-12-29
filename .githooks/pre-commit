@@ -1,48 +1,58 @@
 #!/usr/bin/env bash
-# Pre-commit hook to ensure module checksums are always up-to-date
+# Pre-commit hook to ensure pinned checksums stay up-to-date.
 
-set -e
+set -euo pipefail
 
-# Check if any module files changed
-MODULES_CHANGED=$(git diff --cached --name-only | grep '^modules/ubs-.*\.sh$' || true)
+compute_sha256() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+    return 0
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+    return 0
+  fi
+  if command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$file" | awk '{print $NF}'
+    return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$file" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
 
-if [[ -n "$MODULES_CHANGED" ]]; then
+data = Path(sys.argv[1]).read_bytes()
+print(hashlib.sha256(data).hexdigest())
+PY
+    return 0
+  fi
+  return 1
+}
+
+# Check if any pinned checksum inputs changed.
+# - Pinned module sources: modules/ubs-*.sh, modules/helpers/*.{py,go,js}
+# - Release checksums: install.sh, ubs
+CHECKSUM_TRIGGER_CHANGED="$(
+  git diff --cached --name-only | grep -E '^(install\.sh|ubs|modules/(ubs-.*\.sh|helpers/[^/]+\.(py|go|js))$)' || true
+)"
+
+if [[ -n "$CHECKSUM_TRIGGER_CHANGED" ]]; then
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo "📦 Module files changed - updating checksums..."
+  echo "📦 Checksum inputs changed - updating checksums..."
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   
-  # Update checksums
   ./scripts/update_checksums.sh
   
-  # Check if ubs file changed
-  if git diff --exit-code ubs >/dev/null 2>&1; then
-    echo "✓ Checksums already up-to-date"
-  else
-    echo ""
-    echo "✓ Checksums updated in 'ubs' file"
-    echo "  Automatically staging updated checksums..."
+  if ! git diff --exit-code ubs >/dev/null 2>&1; then
+    echo "✓ Updated pinned checksums in 'ubs'"
     git add ubs
-    echo "  ✓ Staged"
   fi
-  
-  echo ""
-fi
-
-# Check if ubs script changed and update SHA256SUMS
-UBS_CHANGED=$(git diff --cached --name-only | grep '^ubs$' || true)
-
-if [[ -n "$UBS_CHANGED" ]]; then
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo "📝 ubs script changed - updating SHA256SUMS..."
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-  # Update SHA256SUMS with new checksum
-  sha256sum ubs > SHA256SUMS
-
-  echo "✓ SHA256SUMS updated"
-  echo "  Automatically staging SHA256SUMS..."
-  git add SHA256SUMS
-  echo "  ✓ Staged"
+  if ! git diff --exit-code SHA256SUMS >/dev/null 2>&1; then
+    echo "✓ Updated release checksums in SHA256SUMS"
+    git add SHA256SUMS
+  fi
   echo ""
 fi
 
@@ -57,5 +67,29 @@ if ! ./scripts/verify_checksums.sh; then
   echo "Please run: ./scripts/update_checksums.sh"
   exit 1
 fi
+
+verify_sha256sums_entry() {
+  local file="$1"
+  local expected actual
+  expected="$(awk -v f="$file" '$2==f{print $1}' SHA256SUMS | head -n 1)"
+  if [[ -z "${expected:-}" ]]; then
+    echo "❌ SHA256SUMS missing entry for $file" >&2
+    exit 1
+  fi
+  actual="$(compute_sha256 "$file")" || {
+    echo "❌ Could not compute SHA256 (need sha256sum, shasum, openssl, or python3)" >&2
+    exit 1
+  }
+  if [[ "$expected" != "$actual" ]]; then
+    echo "❌ SHA256SUMS mismatch for $file" >&2
+    echo "  Expected: $expected" >&2
+    echo "  Actual:   $actual" >&2
+    echo "  Fix: ./scripts/update_checksums.sh" >&2
+    exit 1
+  fi
+}
+
+verify_sha256sums_entry install.sh
+verify_sha256sums_entry ubs
 
 echo "✓ Pre-commit checks passed"

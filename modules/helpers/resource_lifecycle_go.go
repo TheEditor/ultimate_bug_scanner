@@ -91,7 +91,10 @@ func (a *analyzer) markReleased(name string, kinds ...resourceKind) {
 		return
 	}
 	entries := a.lookup(name)
-	for _, res := range entries {
+	// When a name is rebound (e.g., `f := os.Open(...); f = os.Open(...); f.Close()`),
+	// the close applies to the most recent acquisition bound to that identifier.
+	for i := len(entries) - 1; i >= 0; i-- {
+		res := entries[i]
 		if res.released {
 			continue
 		}

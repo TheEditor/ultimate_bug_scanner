@@ -106,8 +106,20 @@ if [ "$INSECURE" -eq 0 ]; then
   fi
 fi
 
-TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+mktemp_dir() {
+  local base="${TMPDIR:-/tmp}"
+  mktemp -d 2>/dev/null \
+    || mktemp -d -t ubs-verify.XXXXXX 2>/dev/null \
+    || mktemp -d "${base%/}/ubs-verify.XXXXXX" 2>/dev/null
+}
+
+TMPDIR="$(mktemp_dir)" || die "Failed to create temporary directory (mktemp -d)"
+cleanup() {
+  local dir="${TMPDIR:-}"
+  [[ -n "$dir" && "$dir" != "/" ]] || return 0
+  rm -rf "$dir" 2>/dev/null || true
+}
+trap cleanup EXIT
 
 download() {
   local url="$1" out="$2"

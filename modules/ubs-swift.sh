@@ -21,7 +21,7 @@
 # • additional Swift pitfalls: URLComponents vs string, os.Logger privacy, etc.
 #
 # Supports:
-# --format text|json|sarif (ast-grep passthrough for json/sarif)
+# --format text|json|sarif (json emits UBS summary; sarif is ast-grep passthrough)
 # --rules DIR (merge user ast-grep rules)
 # --fail-on-warning, --skip, --jobs, --include-ext, --exclude, --ci, --no-color, --force-color
 # --summary-json FILE (machine-readable run summary with rule histogram)
@@ -68,7 +68,7 @@ cleanup(){
  [[ "$KEEP_TEMP" -eq 1 ]] && return 0
  local p
  for p in "${TEMP_PATHS[@]:-}"; do
-  [[ -n "$p" ]] && rm -rf "$p" 2>/dev/null || true
+  [[ -n "$p" && "$p" != "/" && "$p" != "." ]] && rm -rf -- "$p" 2>/dev/null || true
  done
 }
 trap cleanup EXIT
@@ -76,7 +76,7 @@ trap cleanup EXIT
 mktemp_dir(){
  local prefix="${1:-ubs_tmp}"
  local tmp="${TMPDIR:-/tmp}"
- mktemp -d "${tmp%/}/${prefix}.XXXXXXXX" 2>/dev/null || mktemp -d -t "${prefix}.XXXXXXXX" 2>/dev/null || mktemp
+ mktemp -d "${tmp%/}/${prefix}.XXXXXXXX" 2>/dev/null || mktemp -d -t "${prefix}.XXXXXXXX" 2>/dev/null
 }
 mktemp_file(){
  local prefix="${1:-ubs_tmp}"
@@ -420,10 +420,16 @@ fi
 
 init_colors
 
+if [[ "$FORMAT" == "json" ]]; then
+  # Machine-readable JSON mode: keep stdout clean (JSON only) by routing logs to stderr.
+  exec 3>&1
+  exec 1>&2
+  QUIET=1
+fi
+
 safe_date() {
   if [[ "$CI_MODE" -eq 1 ]]; then command date -u '+%Y-%m-%dT%H:%M:%SZ' || command date '+%Y-%m-%dT%H:%M:%SZ'; else command date '+%Y-%m-%d %H:%M:%S'; fi
 }
-DATE_CMD="safe_date"
 
 CRITICAL_COUNT=0
 WARNING_COUNT=0
@@ -432,34 +438,38 @@ TOTAL_FILES=0
 SWIFT_FILE_COUNT=0
 HAS_SWIFT_FILES=0
 
+declare -A CAT_TOTAL=()
+declare -A CAT_CRITICAL=()
+declare -A CAT_WARNING=()
+declare -A CAT_INFO=()
+
 for __i in $(seq 1 23); do
-  eval "CAT${__i}=0"
-  eval "CAT${__i}_critical=0"
-  eval "CAT${__i}_warning=0"
-  eval "CAT${__i}_info=0"
+  CAT_TOTAL["$__i"]=0
+  CAT_CRITICAL["$__i"]=0
+  CAT_WARNING["$__i"]=0
+  CAT_INFO["$__i"]=0
 done
 
 set_category(){ CURRENT_CATEGORY_ID="$1"; }
 inc_category_total(){
  local c="${1:-0}" id="${CURRENT_CATEGORY_ID:-0}"
- [[ "${id:-0}" -gt 0 ]] || return 0
- local vname="CAT${id}"
-  eval "$vname=\$(( \${$vname:-0} + c ))"
+ [[ "${id:-0}" =~ ^[0-9]+$ && "${id:-0}" -gt 0 ]] || return 0
+ CAT_TOTAL["$id"]=$(( ${CAT_TOTAL["$id"]:-0} + c ))
 }
 _bump_counts(){
  local sev="$1" cnt="$2" id="${CURRENT_CATEGORY_ID:-0}"
   case "$sev" in
   critical)
    CRITICAL_COUNT=$((CRITICAL_COUNT + cnt))
-   [[ "$id" -gt 0 ]] && eval "CAT${id}_critical=\$(( \${CAT${id}_critical:-0} + cnt ))"
+   [[ "${id:-0}" =~ ^[0-9]+$ && "${id:-0}" -gt 0 ]] && CAT_CRITICAL["$id"]=$(( ${CAT_CRITICAL["$id"]:-0} + cnt ))
    ;;
   warning)
    WARNING_COUNT=$((WARNING_COUNT + cnt))
-   [[ "$id" -gt 0 ]] && eval "CAT${id}_warning=\$(( \${CAT${id}_warning:-0} + cnt ))"
+   [[ "${id:-0}" =~ ^[0-9]+$ && "${id:-0}" -gt 0 ]] && CAT_WARNING["$id"]=$(( ${CAT_WARNING["$id"]:-0} + cnt ))
    ;;
   info)
    INFO_COUNT=$((INFO_COUNT + cnt))
-   [[ "$id" -gt 0 ]] && eval "CAT${id}_info=\$(( \${CAT${id}_info:-0} + cnt ))"
+   [[ "${id:-0}" =~ ^[0-9]+$ && "${id:-0}" -gt 0 ]] && CAT_INFO["$id"]=$(( ${CAT_INFO["$id"]:-0} + cnt ))
    ;;
   esac
   inc_category_total "$cnt"
@@ -539,7 +549,7 @@ with_timeout(){
   if [[ -n "$TIMEOUT_CMD" && "${TIMEOUT_SECONDS:-0}" -gt 0 ]]; then "$TIMEOUT_CMD" "$TIMEOUT_SECONDS" "$@"; else "$@"; fi
 }
 
-maybe_clear(){ if [[ -t 1 && "$CI_MODE" -eq 0 ]]; then clear || true; fi; }
+maybe_clear(){ if [[ "$FORMAT" == "text" && -t 1 && "$CI_MODE" -eq 0 ]]; then clear || true; fi; }
 say(){ [[ "$QUIET" -eq 1 ]] && return 0; echo -e "$*"; }
 tick(){ [[ "$PROGRESS" -eq 1 && "$QUIET" -eq 0 ]] && printf "%s" "."; }
 
@@ -626,7 +636,19 @@ end_scan_section(){ trap on_err ERR; set -e; set -o pipefail; }
 
 check_ast_grep(){
   if command -v ast-grep >/dev/null 2>&1; then AST_GREP_CMD=(ast-grep); HAS_AST_GREP=1; return 0; fi
- if command -v sg >/dev/null 2>&1; then AST_GREP_CMD=(sg); HAS_AST_GREP=1; return 0; fi
+  # Beware: many Unix systems ship a different `sg` (util-linux setgid helper).
+  # Only accept `sg` if it is the ast-grep CLI.
+  if command -v sg >/dev/null 2>&1; then
+    local out=""
+    out="$(sg --version 2>&1 || true)"
+    if printf '%s\n' "$out" | grep -qi "ast-grep"; then
+      AST_GREP_CMD=(sg); HAS_AST_GREP=1; return 0
+    fi
+    out="$(sg --help 2>&1 || true)"
+    if printf '%s\n' "$out" | grep -qi "ast-grep"; then
+      AST_GREP_CMD=(sg); HAS_AST_GREP=1; return 0
+    fi
+  fi
  if command -v npx >/dev/null 2>&1; then AST_GREP_CMD=(npx -y @ast-grep/cli); HAS_AST_GREP=1; return 0; fi
  HAS_AST_GREP=0
   say "${YELLOW}${WARN} ast-grep not found. Advanced AST checks will be skipped.${RESET}"
@@ -1538,11 +1560,8 @@ run_swift_type_narrowing_checks(){
     return 0
   fi
   local output status
-  # DEBUG trace
-  echo "DEBUG: Running swift helper on $PROJECT_DIR" >&2
   output="$(python3 "$helper" "$PROJECT_DIR" 2>&1)"
   status=$?
-  echo "DEBUG: Helper status=$status output_len=${#output}" >&2
   if [[ $status -ne 0 ]]; then
     print_finding "info" 0 "Swift type narrowing helper failed" "$output"
     return 0
@@ -1891,44 +1910,22 @@ else
   )
 fi
 [[ "$SWIFT_FILE_COUNT" -gt 0 ]] && HAS_SWIFT_FILES=1 || HAS_SWIFT_FILES=0
-say "DEBUG: SWIFT_FILE_COUNT=$SWIFT_FILE_COUNT HAS_SWIFT_FILES=$HAS_SWIFT_FILES PROJECT_DIR=$PROJECT_DIR" >&2
 
-# MACHINE-READABLE MODE: emit ONLY json/sarif to stdout and exit.
-if [[ "$FORMAT" == "json" || "$FORMAT" == "sarif" ]]; then
- QUIET=1; NO_COLOR_FLAG=1; init_colors
- check_ast_grep || die "ast-grep is required for --format=$FORMAT"
+# MACHINE-READABLE MODE: emit ONLY SARIF to stdout and exit.
+if [[ "$FORMAT" == "sarif" ]]; then
+  QUIET=1; NO_COLOR_FLAG=1; init_colors
+  check_ast_grep || die "ast-grep is required for --format=$FORMAT"
   write_ast_rules || true
 
- tmp_out="$(mktemp_file ubs_ast_out)"
- cleanup_add "$tmp_out"
- cfg_file="$(mktemp_file ubs_sgconfig)"
- cleanup_add "$cfg_file"
- printf 'ruleDirs:\n- %s\n' "$AST_RULE_DIR" >"$cfg_file" 2>/dev/null || true
-  if [[ "$FORMAT" == "json" ]]; then
-  with_timeout "${AST_GREP_CMD[@]}" scan -c "$cfg_file" "$PROJECT_DIR" --json >"$tmp_out" 2>/dev/null || true
+  tmp_out="$(mktemp_file ubs_ast_out)"
+  cleanup_add "$tmp_out"
+  cfg_file="$(mktemp_file ubs_sgconfig)"
+  cleanup_add "$cfg_file"
+  printf 'ruleDirs:\n- %s\n' "$AST_RULE_DIR" >"$cfg_file" 2>/dev/null || true
+  with_timeout "${AST_GREP_CMD[@]}" scan -c "$cfg_file" "$PROJECT_DIR" --format sarif >"$tmp_out" 2>/dev/null || true
   cat "$tmp_out"
   if command -v python3 >/dev/null 2>&1; then
-   read -r CRITICAL_COUNT WARNING_COUNT INFO_COUNT <<<"$(python3 - "$tmp_out" <<'PY'
-import json,sys
-try:
- data=json.load(open(sys.argv[1],'r',encoding='utf-8'))
-except Exception:
- print("0 0 0"); sys.exit(0)
-c=w=i=0
-for o in data if isinstance(data,list) else []:
- sev=(o.get('severity') or o.get('level') or 'info').lower()
- if sev in ('error','critical','fatal','high','serious'): c+=1
- elif sev in ('warning','warn','medium'): w+=1
-    else: i+=1
-print(c,w,i)
-PY
-    )"
-  fi
-  else
-  with_timeout "${AST_GREP_CMD[@]}" scan -c "$cfg_file" "$PROJECT_DIR" --format sarif >"$tmp_out" 2>/dev/null || true
-    cat "$tmp_out"
-  if command -v python3 >/dev/null 2>&1; then
-   read -r CRITICAL_COUNT WARNING_COUNT INFO_COUNT <<<"$(python3 - "$tmp_out" <<'PY'
+    read -r CRITICAL_COUNT WARNING_COUNT INFO_COUNT <<<"$(python3 - "$tmp_out" <<'PY'
 import json,sys
 try:
   sar=json.load(open(sys.argv[1],'r',encoding='utf-8'))
@@ -1945,27 +1942,26 @@ print(crit, warn, info)
 PY
     )"
   fi
- fi
 
   if [[ -n "$SUMMARY_JSON" ]]; then
     {
-   printf '{'
-   printf '"version":"%s",' "$(json_escape "$VERSION")"
-   printf '"project":"%s",' "$(json_escape "$PROJECT_DIR")"
-   printf '"files":%s,' "$TOTAL_FILES"
-   printf '"critical":%s,' "${CRITICAL_COUNT:-0}"
-   printf '"warning":%s,' "${WARNING_COUNT:-0}"
-   printf '"info":%s,' "${INFO_COUNT:-0}"
-   printf '"timestamp":"%s",' "$(eval "$DATE_CMD")"
-   printf '"format":"%s",' "$(json_escape "$FORMAT")"
-   printf '"sdk":"%s"' "$(json_escape "$SDK_KIND")"
-   printf '}\n'
+      printf '{'
+      printf '"version":"%s",' "$(json_escape "$VERSION")"
+      printf '"project":"%s",' "$(json_escape "$PROJECT_DIR")"
+      printf '"files":%s,' "$TOTAL_FILES"
+      printf '"critical":%s,' "${CRITICAL_COUNT:-0}"
+      printf '"warning":%s,' "${WARNING_COUNT:-0}"
+      printf '"info":%s,' "${INFO_COUNT:-0}"
+      printf '"timestamp":"%s",' "$(safe_date)"
+      printf '"format":"%s",' "$(json_escape "$FORMAT")"
+      printf '"sdk":"%s"' "$(json_escape "$SDK_KIND")"
+      printf '}\n'
     } > "$SUMMARY_JSON" 2>/dev/null || true
   fi
 
   EXIT_CODE=0
- [[ "${CRITICAL_COUNT:-0}" -gt 0 ]] && EXIT_CODE=1
- [[ "$FAIL_ON_WARNING" -eq 1 && $((CRITICAL_COUNT + WARNING_COUNT)) -gt 0 ]] && EXIT_CODE=1
+  [[ "${CRITICAL_COUNT:-0}" -gt 0 ]] && EXIT_CODE=1
+  [[ "$FAIL_ON_WARNING" -eq 1 && $((CRITICAL_COUNT + WARNING_COUNT)) -gt 0 ]] && EXIT_CODE=1
   exit "$EXIT_CODE"
 fi
 
@@ -2009,7 +2005,7 @@ echo -e "${RESET}"
 
 say "${WHITE}Version:${RESET} ${CYAN}${VERSION}${RESET}"
 say "${WHITE}Project:${RESET} ${CYAN}$PROJECT_DIR${RESET}"
-say "${WHITE}Started:${RESET} ${GRAY}$(eval "$DATE_CMD")${RESET}"
+say "${WHITE}Started:${RESET} ${GRAY}$(safe_date)${RESET}"
 say "${WHITE}Files:${RESET} ${CYAN}$TOTAL_FILES source files (${INCLUDE_EXT})${RESET}"
 if [[ "$HAS_RIPGREP" -eq 1 ]]; then
  say "${WHITE}Ripgrep:${RESET} ${CYAN}enabled${RESET} ${DIM}(pcre2=${RG_PCRE2_OK}, respect-ignore=${RESPECT_IGNORE}, no-ignore=${NO_IGNORE_ALL})${RESET}"
@@ -2633,15 +2629,18 @@ if [[ -n "$SUMMARY_JSON" ]]; then
   printf '"version":"%s",' "$(json_escape "$VERSION")"
   printf '"project":"%s",' "$(json_escape "$PROJECT_DIR")"
     printf '"files":%s,' "$TOTAL_FILES"
-    printf '"critical":%s,' "$CRITICAL_COUNT"
+  printf '"critical":%s,' "$CRITICAL_COUNT"
     printf '"warning":%s,' "$WARNING_COUNT"
     printf '"info":%s,' "$INFO_COUNT"
-  printf '"timestamp":"%s",' "$(json_escape "$(eval "$DATE_CMD")")"
+  printf '"timestamp":"%s",' "$(json_escape "$(safe_date)")"
   printf '"format":"%s",' "$(json_escape "$FORMAT")"
   printf '"sdk":"%s",' "$(json_escape "$SDK_KIND")"
     printf '"categories":{'
     for i in $(seq 1 23); do
-      eval "t=\${CAT${i}:-0}"; eval "c=\${CAT${i}_critical:-0}"; eval "w=\${CAT${i}_warning:-0}"; eval "n=\${CAT${i}_info:-0}"
+      t="${CAT_TOTAL[$i]:-0}"
+      c="${CAT_CRITICAL[$i]:-0}"
+      w="${CAT_WARNING[$i]:-0}"
+      n="${CAT_INFO[$i]:-0}"
       printf '"%d":{"total":%s,"critical":%s,"warning":%s,"info":%s}' "$i" "$(num_clamp "$t")" "$(num_clamp "$c")" "$(num_clamp "$w")" "$(num_clamp "$n")"
    [[ $i -lt 23 ]] && printf ','
     done
@@ -2680,7 +2679,7 @@ if [[ -n "$REPORT_MD" ]]; then
     echo ""
     echo "- Project: \`$PROJECT_DIR\`"
     echo "- Files: $TOTAL_FILES"
-    echo "- Timestamp: $(eval "$DATE_CMD")"
+    echo "- Timestamp: $(safe_date)"
     echo ""
     echo "## Totals"
     echo ""
@@ -2693,7 +2692,10 @@ if [[ -n "$REPORT_MD" ]]; then
     echo "| # | Total | Critical | Warning | Info |"
     echo "|-:|---:|---:|---:|---:|"
     for i in $(seq 1 23); do
-      eval "t=\${CAT${i}:-0}"; eval "c=\${CAT${i}_critical:-0}"; eval "w=\${CAT${i}_warning:-0}"; eval "n=\${CAT${i}_info:-0}"
+      t="${CAT_TOTAL[$i]:-0}"
+      c="${CAT_CRITICAL[$i]:-0}"
+      w="${CAT_WARNING[$i]:-0}"
+      n="${CAT_INFO[$i]:-0}"
       echo "| $i | $t | $c | $w | $n |"
     done
   } > "$REPORT_MD" 2>/dev/null || true
@@ -2704,7 +2706,10 @@ if [[ -n "$EMIT_CSV" ]]; then
   {
     echo "category,total,critical,warning,info"
     for i in $(seq 1 23); do
-      eval "t=\${CAT${i}:-0}"; eval "c=\${CAT${i}_critical:-0}"; eval "w=\${CAT${i}_warning:-0}"; eval "n=\${CAT${i}_info:-0}"
+      t="${CAT_TOTAL[$i]:-0}"
+      c="${CAT_CRITICAL[$i]:-0}"
+      w="${CAT_WARNING[$i]:-0}"
+      n="${CAT_INFO[$i]:-0}"
       echo "$i,$t,$c,$w,$n"
     done
   } > "$EMIT_CSV" 2>/dev/null || true
@@ -2718,14 +2723,17 @@ if [[ -n "$EMIT_HTML" ]]; then
     echo "<h1>UBS Swift Report</h1>"
   echo "<p><strong>Project:</strong> $(printf %s "$PROJECT_DIR" | sed 's/&/&amp;/g;s/</\&lt;/g;s/>/\&gt;/g')</p>"
     echo "<p><strong>Files:</strong> $TOTAL_FILES</p>"
-    echo "<p><strong>Timestamp:</strong> $(eval "$DATE_CMD")</p>"
+    echo "<p><strong>Timestamp:</strong> $(safe_date)</p>"
     echo "<h2>Totals</h2>"
     echo "<table><tr><th>Critical</th><th>Warning</th><th>Info</th></tr>"
     echo "<tr><td class='crit'>$CRITICAL_COUNT</td><td class='warn'>$WARNING_COUNT</td><td class='ok'>$INFO_COUNT</td></tr></table>"
     echo "<h2>Categories</h2>"
     echo "<table><tr><th>#</th><th>Total</th><th>Critical</th><th>Warning</th><th>Info</th></tr>"
     for i in $(seq 1 23); do
-      eval "t=\${CAT${i}:-0}"; eval "c=\${CAT${i}_critical:-0}"; eval "w=\${CAT${i}_warning:-0}"; eval "n=\${CAT${i}_info:-0}"
+      t="${CAT_TOTAL[$i]:-0}"
+      c="${CAT_CRITICAL[$i]:-0}"
+      w="${CAT_WARNING[$i]:-0}"
+      n="${CAT_INFO[$i]:-0}"
       echo "<tr><td>$i</td><td>$t</td><td class='crit'>$c</td><td class='warn'>$w</td><td class='ok'>$n</td></tr>"
     done
     echo "</table>"
@@ -2734,7 +2742,7 @@ if [[ -n "$EMIT_HTML" ]]; then
 fi
 
 echo ""
-say "${DIM}Scan completed at: $(eval "$DATE_CMD")${RESET}"
+say "${DIM}Scan completed at: $(safe_date)${RESET}"
 
 if [[ -n "$OUTPUT_FILE" ]]; then
   say "${GREEN}${CHECK} Full report saved to: ${CYAN}$OUTPUT_FILE${RESET}"
@@ -2750,4 +2758,20 @@ echo ""
 EXIT_CODE=0
 [[ "$CRITICAL_COUNT" -gt 0 ]] && EXIT_CODE=1
 [[ "$FAIL_ON_WARNING" -eq 1 && $((CRITICAL_COUNT + WARNING_COUNT)) -gt 0 ]] && EXIT_CODE=1
+
+if [[ "$FORMAT" == "json" ]]; then
+  {
+    printf '{'
+    printf '"version":"%s",' "$(json_escape "$VERSION")"
+    printf '"project":"%s",' "$(json_escape "$PROJECT_DIR")"
+    printf '"files":%s,' "$TOTAL_FILES"
+    printf '"critical":%s,' "$CRITICAL_COUNT"
+    printf '"warning":%s,' "$WARNING_COUNT"
+    printf '"info":%s,' "$INFO_COUNT"
+    printf '"timestamp":"%s",' "$(json_escape "$(safe_date)")"
+    printf '"format":"%s",' "$(json_escape "$FORMAT")"
+    printf '"sdk":"%s"' "$(json_escape "$SDK_KIND")"
+    printf '}\n'
+  } >&3
+fi
 exit "$EXIT_CODE"

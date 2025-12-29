@@ -188,7 +188,13 @@ if [[ -n "${OUTPUT_FILE}" ]]; then
 fi
 
 DATE_FMT='%Y-%m-%d %H:%M:%S'
-if [[ "$CI_MODE" -eq 1 ]]; then DATE_CMD="date -u '+%Y-%m-%dT%H:%M:%SZ'"; else DATE_CMD="date '+$DATE_FMT'"; fi
+safe_date() {
+  if [[ "$CI_MODE" -eq 1 ]]; then
+    command date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || command date '+%Y-%m-%dT%H:%M:%SZ'
+  else
+    command date "+$DATE_FMT"
+  fi
+}
 is_machine_format(){ [[ "$FORMAT" == "json" || "$FORMAT" == "sarif" ]]; }
 
 # If machine format: silence all user-facing text immediately.
@@ -211,6 +217,7 @@ TOTAL_FILES=0
 HAS_AST_GREP=0
 AST_GREP_CMD=()
 AST_RULE_DIR=""
+AST_CONFIG_FILE=""
 HAS_RIPGREP=0
 HAS_BUNDLE=0
 BUNDLE_EXEC=()
@@ -248,6 +255,37 @@ declare -A RESOURCE_LIFECYCLE_REMEDIATION=(
 # ────────────────────────────────────────────────────────────────────────────
 maybe_clear() { if [[ -t 1 && "$CI_MODE" -eq 0 && ! is_machine_format ]]; then clear || true; fi; }
 say() { [[ "$QUIET" -eq 1 ]] && return 0; echo -e "$*"; }
+
+json_escape() {
+  local s="${1-}"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+emit_json_summary() {
+  local ts json
+  ts="$(safe_date)"
+  json="$(printf '{"project":"%s","files":%s,"critical":%s,"warning":%s,"info":%s,"timestamp":"%s","format":"json"}\n' \
+    "$(json_escape "$PROJECT_DIR")" "$TOTAL_FILES" "$CRITICAL_COUNT" "$WARNING_COUNT" "$INFO_COUNT" "$(json_escape "$ts")")"
+  printf '%s' "$json"
+  if [[ -n "$SUMMARY_JSON" ]]; then
+    mkdir -p "$(dirname "$SUMMARY_JSON")" 2>/dev/null || true
+    printf '%s' "$json" >"$SUMMARY_JSON"
+  fi
+}
+
+emit_sarif() {
+  if [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_CONFIG_FILE" && -f "$AST_CONFIG_FILE" ]]; then
+    if run_ast_rules sarif; then
+      return 0
+    fi
+  fi
+  printf '%s\n' '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"ubs-ruby"}},"results":[]}]}'
+}
 print_header() { say "\n${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"; say "${WHITE}${BOLD}$1${RESET}"; say "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"; }
 print_category() { say "\n${MAGENTA}${BOLD}▓▓▓ $1${RESET}"; say "${DIM}$2${RESET}"; }
 print_subheader() { say "\n${YELLOW}${BOLD}$BULLET $1${RESET}"; }
@@ -379,7 +417,19 @@ fi
 # ast-grep helpers
 check_ast_grep() {
   if command -v ast-grep >/dev/null 2>&1; then AST_GREP_CMD=(ast-grep); HAS_AST_GREP=1; return 0; fi
-  if command -v sg       >/dev/null 2>&1; then AST_GREP_CMD=(sg);       HAS_AST_GREP=1; return 0; fi
+  # Beware: many Unix systems ship a different `sg` (util-linux setgid helper).
+  # Only accept `sg` if it is the ast-grep CLI.
+  if command -v sg >/dev/null 2>&1; then
+    local out=""
+    out="$(sg --version 2>&1 || true)"
+    if printf '%s\n' "$out" | grep -qi 'ast-grep'; then
+      AST_GREP_CMD=(sg); HAS_AST_GREP=1; return 0
+    fi
+    out="$(sg --help 2>&1 || true)"
+    if printf '%s\n' "$out" | grep -qi 'ast-grep'; then
+      AST_GREP_CMD=(sg); HAS_AST_GREP=1; return 0
+    fi
+  fi
   if command -v npx      >/dev/null 2>&1; then AST_GREP_CMD=(npx -y @ast-grep/cli); HAS_AST_GREP=1; return 0; fi
   say "${YELLOW}${WARN} ast-grep not found. Advanced AST checks will be skipped.${RESET}"
   say "${DIM}Tip: npm i -g @ast-grep/cli  or  cargo install ast-grep${RESET}"
@@ -438,8 +488,13 @@ PYHELP
 }
 write_ast_rules() {
   [[ "$HAS_AST_GREP" -eq 1 ]] || return 0
-  trap '[[ -n "${AST_RULE_DIR:-}" ]] && rm -rf "$AST_RULE_DIR" || true' EXIT
+  trap '[[ -n "${AST_RULE_DIR:-}" && "${AST_RULE_DIR:-}" != "/" && "${AST_RULE_DIR:-}" != "." ]] && rm -rf -- "$AST_RULE_DIR" 2>/dev/null || true; [[ -n "${AST_CONFIG_FILE:-}" ]] && rm -f "$AST_CONFIG_FILE" 2>/dev/null || true' EXIT
   AST_RULE_DIR="$(mktemp_dir)"
+  AST_CONFIG_FILE="$(mktemp_file)"
+  cat >"$AST_CONFIG_FILE" <<YAML
+ruleDirs:
+  - "$AST_RULE_DIR"
+YAML
   if [[ -n "$USER_RULE_DIR" && -d "$USER_RULE_DIR" ]]; then
     cp -R "$USER_RULE_DIR"/. "$AST_RULE_DIR"/ 2>/dev/null || true
   fi
@@ -629,7 +684,8 @@ rule:
   pattern: open($STR)
 constraints:
   STR:
-    regex: '^\s*["'\'']\|'
+    kind: string
+    regex: "^\\s*[\"']\\|"
 severity: warning
 message: "Kernel#open with leading '|' spawns a subshell; avoid or validate inputs."
 YAML
@@ -761,23 +817,47 @@ filter_rules_by_glob(){
   fi
 }
 run_ast_rules() {
-  [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_RULE_DIR" ]] || return 1
-  local outfmt="--json"; [[ "$FORMAT" == "sarif" ]] && outfmt="--sarif"
+  local mode="${1:-json}" # json|sarif
+  [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_CONFIG_FILE" && -f "$AST_CONFIG_FILE" ]] || return 1
   local threads=()
   if [[ "$AG_THREADS" -gt 0 ]]; then threads=(--threads "$AG_THREADS"); else
     local n="$( (command -v nproc >/dev/null && nproc) || sysctl -n hw.ncpu 2>/dev/null || echo 0 )"
     [[ "$n" -gt 0 ]] && threads=(--threads "$n")
   fi
-  local extra=(); [[ "$AG_FIXABLE_ONLY" -eq 1 ]] && extra+=(--only-fixable)
+
   if [[ "$AG_PREVIEW_FIX" -eq 1 ]]; then
-    "${AST_GREP_CMD[@]}" fix -r "$AST_RULE_DIR" "$PROJECT_DIR" --dry-run --diff "${threads[@]}" 2>/dev/null || true
-    return 0
+    echo "ubs-ruby: --ag-preview-fix is not supported by this ast-grep CLI; use 'ast-grep scan -i' interactively instead." >&2
+    return 2
   fi
-  if "${AST_GREP_CMD[@]}" scan -r "$AST_RULE_DIR" "$PROJECT_DIR" $outfmt "${threads[@]}" "${extra[@]}" 2>/dev/null; then
-    return 0
+  if [[ "$AG_FIXABLE_ONLY" -eq 1 ]]; then
+    echo "ubs-ruby: --ag-fixable-only is not supported by this ast-grep CLI; running full rule pack." >&2
+  fi
+
+  local code=0
+  local err
+  err="$(mktemp_file)"
+  set +e
+  if [[ "$mode" == "sarif" ]]; then
+    "${AST_GREP_CMD[@]}" scan -c "$AST_CONFIG_FILE" "$PROJECT_DIR" --format sarif "${threads[@]}" 2>"$err"
+    code=$?
   else
-    return 1
+    "${AST_GREP_CMD[@]}" scan -c "$AST_CONFIG_FILE" "$PROJECT_DIR" --json "${threads[@]}" 2>"$err"
+    code=$?
   fi
+  set -e
+
+  # `ast-grep scan` returns exit 1 when error-level diagnostics are found.
+  # Treat that as a successful scan so UBS can still parse findings.
+  if [[ "$code" -eq 0 || "$code" -eq 1 ]]; then
+    rm -f "$err" 2>/dev/null || true
+    return 0
+  fi
+  local err_preview=""
+  err_preview="$(head -n 1 "$err" 2>/dev/null || true)"
+  rm -f "$err" 2>/dev/null || true
+  [[ -z "$err_preview" ]] && err_preview="ast-grep scan failed (exit $code)"
+  echo "ubs-ruby: $err_preview" >&2
+  return "$code"
 }
 
 # Bundler/toolchain helpers
@@ -870,7 +950,7 @@ fi
 
 PROJECT_DIR="$(abspath "$PROJECT_DIR")"
 say "${WHITE}Project:${RESET}  ${CYAN}$PROJECT_DIR${RESET}"
-say "${WHITE}Started:${RESET}  ${GRAY}$(eval "$DATE_CMD")${RESET}"
+say "${WHITE}Started:${RESET}  ${GRAY}$(safe_date)${RESET}"
 
 # Count files with robust find
 TOTAL_FILES=$( ( set +o pipefail; "${FIND_CMD[@]}" 2>/dev/null || true ) | safe_count_files )
@@ -878,7 +958,7 @@ TOTAL_FILES=$(( TOTAL_FILES + 0 ))
 say "${WHITE}Files:${RESET}    ${CYAN}$TOTAL_FILES source files (${INCLUDE_EXT})${RESET}"
 
 # ast-grep availability
-echo ""
+say ""
 if check_ast_grep; then
   say "${GREEN}${CHECK} ast-grep available (${AST_GREP_CMD[*]}) - full AST analysis enabled${RESET}"
   write_ast_rules || true
@@ -1512,12 +1592,13 @@ YAML
   local rule_file
   for rule_file in "$rule_dir"/*.yml; do
     if ! "${AST_GREP_CMD[@]}" scan -r "$rule_file" "$PROJECT_DIR" --json=stream >>"$tmp_json" 2>/dev/null; then
-      rm -rf "$rule_dir"; rm -f "$tmp_json"
+      [[ -n "$rule_dir" && "$rule_dir" != "/" && "$rule_dir" != "." ]] && rm -rf -- "$rule_dir" 2>/dev/null || true
+      rm -f "$tmp_json"
       print_finding "info" 0 "ast-grep scan failed" "Unable to compute async error coverage"
       return
     fi
   done
-  rm -rf "$rule_dir"
+  [[ -n "$rule_dir" && "$rule_dir" != "/" && "$rule_dir" != "." ]] && rm -rf -- "$rule_dir" 2>/dev/null || true
   if ! [[ -s "$tmp_json" ]]; then
     rm -f "$tmp_json"
     print_finding "good" "Thread bodies appear to handle exceptions"
@@ -1618,23 +1699,35 @@ fi
 # CATEGORY 18: AST-GREP RULE PACK FINDINGS (JSON/SARIF passthrough)
 # ═══════════════════════════════════════════════════════════════════════════
 if run_category 18; then
-print_header "AST-GREP RULE PACK FINDINGS"
-  if [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_RULE_DIR" ]]; then
-    if [[ "$AG_PREVIEW_FIX" -eq 1 ]]; then
-      run_ast_rules
-    elif [[ "$FORMAT" == "sarif" || -n "$SARIF_OUT" ]]; then
-      if run_ast_rules | tee "${SARIF_OUT:-/dev/null}" >/dev/null; then
-        [[ "$FORMAT" == "sarif" ]] && exit 0
+  if ! is_machine_format; then
+    print_header "AST-GREP RULE PACK FINDINGS"
+  fi
+
+  if [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_CONFIG_FILE" && -f "$AST_CONFIG_FILE" ]]; then
+    if [[ -n "$SARIF_OUT" ]]; then
+      mkdir -p "$(dirname "$SARIF_OUT")" 2>/dev/null || true
+      run_ast_rules sarif >"$SARIF_OUT" 2>/dev/null || true
+    fi
+    if [[ -n "$JSON_OUT" ]]; then
+      mkdir -p "$(dirname "$JSON_OUT")" 2>/dev/null || true
+      run_ast_rules json >"$JSON_OUT" 2>/dev/null || true
+    fi
+
+    if ! is_machine_format; then
+      if [[ -n "$JSON_OUT" ]]; then
+        say "${GREEN}${CHECK} Saved ast-grep JSON to: ${CYAN}$JSON_OUT${RESET}"
       fi
-    elif [[ "$FORMAT" == "json" || -n "$JSON_OUT" ]]; then
-      if run_ast_rules | tee "${JSON_OUT:-/dev/null}" >/dev/null; then
-        [[ "$FORMAT" == "json" ]] && exit 0
+      if [[ -n "$SARIF_OUT" ]]; then
+        say "${GREEN}${CHECK} Saved ast-grep SARIF to: ${CYAN}$SARIF_OUT${RESET}"
       fi
-    else
-      run_ast_rules || say "${YELLOW}${WARN} ast-grep scan subcommand unavailable; rule-pack mode skipped.${RESET}"
+      if [[ -z "$JSON_OUT" && -z "$SARIF_OUT" ]]; then
+        say "${DIM}${INFO} Use --json-out=FILE or --sarif-out=FILE to export ast-grep findings.${RESET}"
+      fi
     fi
   else
-    say "${YELLOW}${WARN} ast-grep not available; install ast-grep or skip category 18.${RESET}"
+    if ! is_machine_format; then
+      say "${YELLOW}${WARN} ast-grep not available; install ast-grep or skip category 18.${RESET}"
+    fi
   fi
 fi
 
@@ -1692,9 +1785,17 @@ end_scan_section
 # FINAL SUMMARY
 # ═══════════════════════════════════════════════════════════════════════════
 
-# If machine format is requested globally, produce pure output and exit
-if [[ "$FORMAT" == "json" || "$FORMAT" == "sarif" ]]; then
-  exit 0
+EXIT_CODE=0
+if [ "$CRITICAL_COUNT" -gt 0 ]; then EXIT_CODE=1; fi
+if [ "$FAIL_ON_WARNING" -eq 1 ] && [ $((CRITICAL_COUNT + WARNING_COUNT)) -gt 0 ]; then EXIT_CODE=1; fi
+
+if [[ "$FORMAT" == "json" ]]; then
+  emit_json_summary
+  exit "$EXIT_CODE"
+fi
+if [[ "$FORMAT" == "sarif" ]]; then
+  emit_sarif
+  exit "$EXIT_CODE"
 fi
 
 echo ""
@@ -1729,7 +1830,7 @@ if [ "$CRITICAL_COUNT" -eq 0 ] && [ "$WARNING_COUNT" -eq 0 ]; then
 fi
 
 echo ""
-say "${DIM}Scan completed at: $(eval "$DATE_CMD")${RESET}"
+say "${DIM}Scan completed at: $(safe_date)${RESET}"
 
 if [[ -n "$OUTPUT_FILE" ]]; then
   say "${GREEN}${CHECK} Full report saved to: ${CYAN}$OUTPUT_FILE${RESET}"
@@ -1737,7 +1838,7 @@ fi
 if [[ -n "$SUMMARY_JSON" ]]; then
   mkdir -p "$(dirname "$SUMMARY_JSON")" 2>/dev/null || true
   printf '{"timestamp":"%s","files":%s,"critical":%s,"warning":%s,"info":%s}\n' \
-     "$(eval "$DATE_CMD")" "$TOTAL_FILES" "$CRITICAL_COUNT" "$WARNING_COUNT" "$INFO_COUNT" >"$SUMMARY_JSON"
+     "$(safe_date)" "$TOTAL_FILES" "$CRITICAL_COUNT" "$WARNING_COUNT" "$INFO_COUNT" >"$SUMMARY_JSON"
 fi
 
 echo ""
@@ -1749,7 +1850,4 @@ fi
 say "${DIM}Add to pre-commit: ./ubs --ci --fail-on-warning . > rb-bug-scan-report.txt${RESET}"
 echo ""
 
-EXIT_CODE=0
-if [ "$CRITICAL_COUNT" -gt 0 ]; then EXIT_CODE=1; fi
-if [ "$FAIL_ON_WARNING" -eq 1 ] && [ $((CRITICAL_COUNT + WARNING_COUNT)) -gt 0 ]; then EXIT_CODE=1; fi
 exit "$EXIT_CODE"

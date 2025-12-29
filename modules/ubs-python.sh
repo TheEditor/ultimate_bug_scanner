@@ -615,13 +615,13 @@ YAML
   local rule_file
   for rule_file in "$rule_dir"/*.yml; do
     if ! "${AST_GREP_CMD[@]}" scan -r "$rule_file" "$PROJECT_DIR" --json=stream >>"$tmp_json" 2>/dev/null; then
-      rm -rf "$rule_dir"
+      [[ -n "$rule_dir" && "$rule_dir" != "/" && "$rule_dir" != "." ]] && rm -rf -- "$rule_dir" 2>/dev/null || true
       rm -f "$tmp_json"
       print_finding "info" 0 "ast-grep scan failed" "Unable to compute async error coverage"
       return
     fi
   done
-  rm -rf "$rule_dir"
+  [[ -n "$rule_dir" && "$rule_dir" != "/" && "$rule_dir" != "." ]] && rm -rf -- "$rule_dir" 2>/dev/null || true
   if ! [[ -s "$tmp_json" ]]; then
     rm -f "$tmp_json"
     print_finding "good" "All async operations appear protected"
@@ -1038,7 +1038,7 @@ write_ast_rules() {
   [[ "$HAS_AST_GREP" -eq 1 ]] || return 0
   AST_RULE_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t py_ag_rules.XXXXXX)"
   AST_CONFIG_FILE="$(mktemp -t ubs-sgconfig.XXXXXX 2>/dev/null || mktemp -t ubs-sgconfig)"
-  trap '[[ -n "${AST_RULE_DIR:-}" ]] && rm -rf "$AST_RULE_DIR" || true; [[ -n "${AST_CONFIG_FILE:-}" ]] && rm -f "$AST_CONFIG_FILE" || true' EXIT
+  trap '[[ -n "${AST_RULE_DIR:-}" && "${AST_RULE_DIR:-}" != "/" && "${AST_RULE_DIR:-}" != "." ]] && rm -rf -- "$AST_RULE_DIR" || true; [[ -n "${AST_CONFIG_FILE:-}" ]] && rm -f "$AST_CONFIG_FILE" || true' EXIT
   # ast-grep 0.40+ scans a directory of rules via an sgconfig.yml (ruleDirs).
   printf 'ruleDirs:\n- %s\n' "$AST_RULE_DIR" >"$AST_CONFIG_FILE" 2>/dev/null || true
   if [[ -n "$USER_RULE_DIR" && -d "$USER_RULE_DIR" ]]; then
@@ -1973,12 +1973,71 @@ print_category "Detects: Division by variable, float equality, modulo hazards" \
   "Silent numeric bugs propagate incorrect results or ZeroDivisionError."
 
 print_subheader "Division by variable (possible ÷0)"
-count=$(
-  ( "${GREP_RN[@]}" -e "/[[:space:]]*[A-Za-z_][A-Za-z0-9_]*" "$PROJECT_DIR" 2>/dev/null || true ) \
-  | (grep -Ev "/[[:space:]]*(255|2|10|100|1000)\b|//|/\*" || true) | count_lines)
+count=0
+division_report=""
+if [[ "$HAS_AST_GREP" -eq 1 ]] && command -v python3 >/dev/null 2>&1; then
+  division_report=$(
+    ( set +o pipefail; "${AST_GREP_CMD[@]}" run -p '$A / $B' -l python "$PROJECT_DIR" --json=stream 2>/dev/null || true ) \
+      | python3 - "$DETAIL_LIMIT" <<'PY'
+import json
+import re
+import sys
+
+limit = int(sys.argv[1])
+count = 0
+samples: list[str] = []
+
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw:
+        continue
+    try:
+        obj = json.loads(raw)
+    except json.JSONDecodeError:
+        continue
+
+    singles = (obj.get("metaVariables") or {}).get("single") or {}
+    denom = (singles.get("B") or {}).get("text") or ""
+    if not re.match(r"^[A-Za-z_]", denom):
+        continue
+
+    count += 1
+    if len(samples) >= limit:
+        continue
+
+    file = obj.get("file") or ""
+    start_line = ((obj.get("range") or {}).get("start") or {}).get("line")
+    line = (start_line + 1) if isinstance(start_line, int) else 0
+    code = (obj.get("lines") or "").strip()
+    if file and line and code:
+        samples.append(f"{file}:{line}:{code}")
+
+print(count)
+for sample in samples:
+    print(sample)
+PY
+  )
+  count=$(printf '%s\n' "$division_report" | head -n 1 | awk 'END{print $0+0}')
+else
+  count=$(
+    ( "${GREP_RN[@]}" -e "[A-Za-z0-9_)\\]][[:space:]]*/[[:space:]]*[A-Za-z_][A-Za-z0-9_]*" "$PROJECT_DIR" 2>/dev/null || true ) \
+      | (grep -Ev "//|/\*" || true) | count_lines
+  )
+fi
 if [ "$count" -gt 25 ]; then
   print_finding "warning" "$count" "Division by variable - verify non-zero" "Guard before division"
-  show_detailed_finding "/[[:space:]]*[A-Za-z_][A-Za-z0-9_]*" 5
+  if [[ -n "$division_report" ]]; then
+    printed=0
+    while IFS= read -r rawline; do
+      [[ -z "$rawline" ]] && continue
+      parse_grep_line "$rawline" || continue
+      print_code_sample "$PARSED_FILE" "$PARSED_LINE" "$PARSED_CODE"
+      printed=$((printed+1))
+      [[ $printed -ge 5 ]] && break
+    done < <(printf '%s\n' "$division_report" | tail -n +2)
+  else
+    show_detailed_finding "[A-Za-z0-9_)\\]][[:space:]]*/[[:space:]]*[A-Za-z_][A-Za-z0-9_]*" 5
+  fi
 elif [ "$count" -gt 0 ]; then
   print_finding "info" "$count" "Division operations found - check divisors"
 fi
@@ -2652,9 +2711,37 @@ if [[ "$ENABLE_UV_TOOLS" -eq 1 ]]; then
     case "$TOOL" in
       ruff)
         print_subheader "ruff (lint)"
-        run_uv_tool_text ruff check "$PROJECT_DIR" --output-format=json || true
-        ruff_count=$(run_uv_tool_text ruff check "$PROJECT_DIR" --output-format=concise | grep -c "^" || true)
-        if [ "${ruff_count:-0}" -gt 0 ]; then print_finding "info" "$ruff_count" "Ruff emitted findings" "Review ruff output above"; else print_finding "good" "Ruff clean"; fi
+        ruff_stdout="$(mktemp -t ubs-ruff.XXXXXX 2>/dev/null || mktemp)"
+        ruff_stderr="$(mktemp -t ubs-ruff.XXXXXX 2>/dev/null || mktemp)"
+        run_uv_tool_text ruff check "$PROJECT_DIR" --output-format=json >"$ruff_stdout" 2>"$ruff_stderr" || true
+        ruff_trimmed="$(tr -d '[:space:]' <"$ruff_stdout" 2>/dev/null || true)"
+        if [[ "$ruff_trimmed" == "[]" ]]; then
+          print_finding "good" "Ruff clean"
+        else
+          ruff_count=0
+          if command -v python3 >/dev/null 2>&1; then
+            ruff_count=$(python3 - "$ruff_stdout" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    print(0)
+    sys.exit(0)
+print(len(data) if isinstance(data, list) else 0)
+PY
+            )
+          fi
+          cat "$ruff_stdout" 2>/dev/null || true
+          if [[ -s "$ruff_stderr" ]]; then
+            say "  ${DIM}ruff stderr:${RESET}"
+            cat "$ruff_stderr" 2>/dev/null || true
+          fi
+          if [ "${ruff_count:-0}" -gt 0 ]; then
+            print_finding "info" "$ruff_count" "Ruff emitted findings" "Review ruff output above"
+          else
+            print_finding "info" 1 "Ruff output needs review" "Non-empty output (or parse failure)"
+          fi
+        fi
         ;;
       bandit)
         print_subheader "bandit (security)"

@@ -13,8 +13,11 @@ POSITIVE_NIL_GUARD = re.compile(r"if\s*\(?\s*([A-Za-z_][\w]*)\s*!=\s*nil[^)\{]*\
 OPTIONAL_CHAIN_GUARD = re.compile(r"if\s*\(?\s*([A-Za-z_][\w]*)\s*\?\.[^)\{]*\)?", re.MULTILINE)
 FORCE_TEMPLATE = r"{name}\s*!"
 ASSIGN_TEMPLATE = r"{name}\s*="
-EXIT_KEYWORDS = ("return", "throw", "break", "continue", "fatalError", "preconditionFailure")
 COMMENT_PATTERN = re.compile(r"//.*?$|/\*.*?\*/", re.MULTILINE | re.DOTALL)
+EXIT_PATTERN = re.compile(
+    r"\b(?:return|throw|break|continue)\b|\b(?:fatalError|preconditionFailure)\b",
+    re.IGNORECASE,
+)
 
 
 def iter_swift_files(root: Path):
@@ -44,11 +47,7 @@ def find_block_end(text: str, brace_start: int) -> int:
 
 def block_has_exit(block: str) -> bool:
     stripped = COMMENT_PATTERN.sub("", block)
-    lower = stripped.lower()
-    for keyword in EXIT_KEYWORDS:
-        if keyword.lower() in lower:
-            return True
-    return False
+    return bool(EXIT_PATTERN.search(stripped))
 
 
 def line_col(text: str, pos: int) -> tuple[int, int]:
@@ -115,12 +114,12 @@ def analyze_file(path: Path):
     
     for match in GUARD_PATTERN.finditer(text):
         name = match.group(1)
-        block_start = match.end()
-        block_end = find_block_end(text, block_start)
-        block_text = text[block_start:block_end]
+        brace_start = max(match.end() - 1, match.start())
+        block_end = find_block_end(text, brace_start)
+        block_text = text[brace_start : block_end + 1]
         if block_has_exit(block_text):
             continue
-        line, col = line_col(text, block_start)
+        line, col = line_col(text, match.start())
         message = f"guard let '{name}' else-block does not exit before continuing"
         issues.append((line, col, message))
     return issues
@@ -133,14 +132,12 @@ def main() -> int:
     root = Path(sys.argv[1]).resolve()
     if not root.exists():
         return 0
-    any_output = False
     for path in iter_swift_files(root):
         try:
             issues = analyze_file(path)
         except OSError:
             continue
         for line, col, message in issues:
-            any_output = True
             print(f"{path}:{line}:{col}\t{message}")
     return 0
 

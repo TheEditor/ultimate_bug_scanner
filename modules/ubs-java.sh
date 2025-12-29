@@ -38,6 +38,30 @@ ORIG_IFS=${IFS}
 IFS=$' \t\n'
 
 # ────────────────────────────────────────────────────────────────────────────
+# Temp paths / cleanup
+# ────────────────────────────────────────────────────────────────────────────
+KEEP_TEMP=${UBS_KEEP_TEMP:-0}
+TEMP_PATHS=()
+
+cleanup_add() { [[ -n "${1:-}" ]] && TEMP_PATHS+=("$1"); }
+
+cleanup() {
+  IFS=${ORIG_IFS}
+  [[ "${KEEP_TEMP}" -eq 1 ]] && return 0
+  local p
+  for p in "${TEMP_PATHS[@]:-}"; do
+    [[ -n "$p" && "$p" != "/" && "$p" != "." ]] && rm -rf -- "$p" 2>/dev/null || true
+  done
+}
+trap cleanup EXIT
+
+mktemp_file() {
+  local prefix="${1:-ubs-java}"
+  local tmp="${TMPDIR:-/tmp}"
+  mktemp "${tmp%/}/${prefix}.XXXXXXXX" 2>/dev/null || mktemp -t "${prefix}.XXXXXXXX"
+}
+
+# ────────────────────────────────────────────────────────────────────────────
 # Error trapping
 # ────────────────────────────────────────────────────────────────────────────
 on_err() {
@@ -192,6 +216,10 @@ if [[ -n "$DETAIL_LIMIT_OVERRIDE" ]]; then DETAIL_LIMIT="$DETAIL_LIMIT_OVERRIDE"
 if [[ -n "${CI:-}" ]]; then CI_MODE=1; fi
 if [[ "$NO_COLOR_FLAG" -eq 1 ]]; then USE_COLOR=0; fi
 if [[ -n "${OUTPUT_FILE}" ]]; then exec > >(tee "${OUTPUT_FILE}") 2>&1; fi
+if [[ "$FORMAT" == "json" || "$FORMAT" == "sarif" ]]; then
+  QUIET=1
+  CI_MODE=1
+fi
 
 # Stable timestamp function (no eval)
 DATE_FMT='%Y-%m-%d %H:%M:%S'
@@ -213,6 +241,7 @@ HAS_SWIFT_FILES=0
 HAS_AST_GREP=0
 AST_GREP_CMD=()
 AST_RULE_DIR=""
+AST_CONFIG_FILE=""
 AST_RULE_RESULTS_JSON=""
 HAS_RG=0
 
@@ -322,7 +351,7 @@ severity_allows() {
   [[ ${rank[$s]:-0} -ge ${rank[$want]:-1} ]]
 }
 
-maybe_clear() { if [[ -t 1 && "$CI_MODE" -eq 0 ]]; then clear || true; fi; }
+maybe_clear() { if [[ -t 1 && "$CI_MODE" -eq 0 && "$QUIET" -eq 0 ]]; then clear || true; fi; }
 say() { [[ "$QUIET" -eq 1 ]] && return 0; echo -e "$*"; }
 
 print_header() {
@@ -734,15 +763,21 @@ rule:
 YAML
   tmp_json="$(mktemp 2>/dev/null || mktemp -t java_async_matches.XXXXXX)"
   : >"$tmp_json"
-  local rule_file
+  local rule_file tmp_err ec
+  tmp_err="$(mktemp_file ubs-java-async-astgrep)"
+  cleanup_add "$tmp_err"
   for rule_file in "$rule_dir"/*.yml; do
-    if ! "${AST_GREP_CMD[@]}" scan -r "$rule_file" "$PROJECT_DIR" --json=stream >>"$tmp_json" 2>/dev/null; then
-      rm -rf "$rule_dir"; rm -f "$tmp_json"
+    ec=0
+    ( set +e; trap - ERR; "${AST_GREP_CMD[@]}" scan -r "$rule_file" "$PROJECT_DIR" --json=stream ) >>"$tmp_json" 2>>"$tmp_err"
+    ec=$?
+    if [[ $ec -ne 0 && $ec -ne 1 ]]; then
+      [[ -n "$rule_dir" && "$rule_dir" != "/" && "$rule_dir" != "." ]] && rm -rf -- "$rule_dir" 2>/dev/null || true
+      rm -f "$tmp_json"
       print_finding "info" 0 "ast-grep scan failed" "Unable to compute async error coverage"
       return
     fi
   done
-  rm -rf "$rule_dir"
+  [[ -n "$rule_dir" && "$rule_dir" != "/" && "$rule_dir" != "." ]] && rm -rf -- "$rule_dir" 2>/dev/null || true
   if ! [[ -s "$tmp_json" ]]; then
     rm -f "$tmp_json"
     print_finding "good" "CompletableFuture usage appears guarded"
@@ -895,8 +930,14 @@ ast_search() {
 
 write_ast_rules() {
   [[ "$HAS_AST_GREP" -eq 1 ]] || return 0
-  trap '[[ -n "${AST_RULE_DIR:-}" ]] && rm -rf "$AST_RULE_DIR" || true' EXIT
   AST_RULE_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t ag_rules.XXXXXX)"
+  cleanup_add "$AST_RULE_DIR"
+  AST_CONFIG_FILE="$(mktemp_file ubs-java-sgconfig)"
+  cleanup_add "$AST_CONFIG_FILE"
+  cat >"$AST_CONFIG_FILE" <<EOF
+ruleDirs:
+  - "$AST_RULE_DIR"
+EOF
   if [[ -n "$USER_RULE_DIR" && -d "$USER_RULE_DIR" ]]; then
     cp -R "$USER_RULE_DIR"/. "$AST_RULE_DIR"/ 2>/dev/null || true
   fi
@@ -1323,16 +1364,31 @@ YAML
 }
 
 run_ast_rules() {
-  [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_RULE_DIR" ]] || return 1
-  local outfmt="--json"; [[ "$FORMAT" == "sarif" ]] && outfmt="--sarif"
-  if [[ -n "$SARIF_OUT" ]]; then "${AST_GREP_CMD[@]}" scan -r "$AST_RULE_DIR" "$PROJECT_DIR" --sarif > "$SARIF_OUT" 2>/dev/null || true; fi
-  if [[ -n "$JSON_OUT" ]]; then "${AST_GREP_CMD[@]}" scan -r "$AST_RULE_DIR" "$PROJECT_DIR" --json=stream > "$JSON_OUT" 2>/dev/null || true; fi
-  "${AST_GREP_CMD[@]}" scan -r "$AST_RULE_DIR" "$PROJECT_DIR" $outfmt 2>/dev/null
+  local mode="${1:-json}" # json|sarif
+  [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_CONFIG_FILE" && -f "$AST_CONFIG_FILE" ]] || return 1
+  local -a outfmt=(--json=stream)
+  [[ "$mode" == "sarif" ]] && outfmt=(--format sarif)
+
+  local tmp_out tmp_err ec=0
+  tmp_out="$(mktemp_file ubs-java-astgrep-out)"; cleanup_add "$tmp_out"
+  tmp_err="$(mktemp_file ubs-java-astgrep-err)"; cleanup_add "$tmp_err"
+
+  ( set +e; trap - ERR; "${AST_GREP_CMD[@]}" scan -c "$AST_CONFIG_FILE" "$PROJECT_DIR" "${outfmt[@]}" ) >"$tmp_out" 2>"$tmp_err"
+  ec=$?
+  if [[ $ec -ne 0 && $ec -ne 1 ]]; then
+    if [[ "$QUIET" -eq 0 ]]; then
+      say "${YELLOW}${WARN} ast-grep scan failed (exit $ec)${RESET}"
+      say "${DIM}$(head -n 1 "$tmp_err" 2>/dev/null || true)${RESET}"
+    fi
+    return 1
+  fi
+  cat "$tmp_out"
+  return 0
 }
 
 
 ensure_ast_rule_results() {
-  [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_RULE_DIR" ]] || return 1
+  [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_CONFIG_FILE" && -f "$AST_CONFIG_FILE" ]] || return 1
   if [[ -n "$AST_RULE_RESULTS_JSON" && -f "$AST_RULE_RESULTS_JSON" ]]; then
     return 0
   fi
@@ -1341,12 +1397,12 @@ ensure_ast_rule_results() {
   if [[ ! -f "$tmp_json" ]]; then
     return 1
   fi
-  if ! "${AST_GREP_CMD[@]}" scan -r "$AST_RULE_DIR" "$PROJECT_DIR" --json=stream >"$tmp_json" 2>/dev/null; then
+  if ! run_ast_rules json >"$tmp_json"; then
     rm -f "$tmp_json"
     return 1
   fi
+  cleanup_add "$tmp_json"
   AST_RULE_RESULTS_JSON="$tmp_json"
-  trap '[[ -n "${AST_RULE_RESULTS_JSON:-}" ]] && rm -f "$AST_RULE_RESULTS_JSON" || true; [[ -n "${AST_RULE_DIR:-}" ]] && rm -rf "$AST_RULE_DIR" || true' EXIT
   return 0
 }
 
@@ -1358,7 +1414,7 @@ emit_ast_rule_group() {
   local good_msg="$5"
   local missing_msg="$6"
 
-  if [[ "$HAS_AST_GREP" -ne 1 || -z "$AST_RULE_DIR" ]]; then
+  if [[ "$HAS_AST_GREP" -ne 1 || -z "$AST_CONFIG_FILE" || ! -f "$AST_CONFIG_FILE" ]]; then
     print_finding "info" 0 "$missing_msg" "Install ast-grep to enable this check"
     return 1
   fi
@@ -1460,6 +1516,8 @@ PYRULE
 run_cmd_log() {
   local logfile="$1"; shift
   local ec=0
+  cleanup_add "$logfile"
+  cleanup_add "${logfile}.ec"
   ( set +e; "$@" >"$logfile" 2>&1; ec=$?; echo "$ec" >"$logfile.ec"; exit 0 )
 }
 
@@ -1482,6 +1540,8 @@ detect_gradle_tasks() {
 # ────────────────────────────────────────────────────────────────────────────
 should_run() {
   local cat="$1"
+  # Guardrail: this module defines categories 1-22; higher numbers are accidental duplicates.
+  if [[ "$cat" -gt 22 ]]; then return 1; fi
   if [[ -n "$ONLY_CATEGORIES" ]]; then
     IFS=',' read -r -a only_arr <<<"$ONLY_CATEGORIES"
     for s in "${only_arr[@]}"; do [[ "$s" == "$cat" ]] && return 0; done
@@ -1499,17 +1559,25 @@ should_run() {
 emit_json_summary() {
   local started="$START_TS"
   local finished="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%s')"
-  printf '{ "project":"%s","files":%s,"critical":%s,"warnings":%s,"info":%s,"started":"%s","finished":"%s","java":"%s","format":"%s" }\n' \
+  printf '{ "project":"%s","files":%s,"critical":%s,"warning":%s,"info":%s,"started":"%s","finished":"%s","java":"%s","format":"%s" }\n' \
     "$(printf %s "$PROJECT_DIR" | sed 's/"/\\"/g')" "$TOTAL_FILES" "$CRITICAL_COUNT" "$WARNING_COUNT" "$INFO_COUNT" \
     "$started" "$finished" "$(printf %s "${JAVA_VERSION_STR:-unknown}" | sed 's/"/\\"/g')" "$FORMAT"
+}
+
+emit_sarif() {
+  if run_ast_rules sarif; then
+    return 0
+  fi
+  printf '%s\n' '{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"ubs-java"}},"results":[]}]}'
 }
 
 # ────────────────────────────────────────────────────────────────────────────
 # Startup banner
 # ────────────────────────────────────────────────────────────────────────────
-maybe_clear
-echo -e "${BOLD}${CYAN}"
-cat <<'BANNER'
+if [[ "$FORMAT" == "text" && "$QUIET" -eq 0 ]]; then
+  maybe_clear
+  echo -e "${BOLD}${CYAN}"
+  cat <<'BANNER'
 ╔════════════════════════════════════════════════════════════════════╗
 ║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗    ║
 ║  ██║   ██║██║  ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝    ║
@@ -1545,10 +1613,11 @@ cat <<'BANNER'
 ║  “We see bugs before you do.”                                      ║
 ╚════════════════════════════════════════════════════════════════════╝
 BANNER
-echo -e "${RESET}"
+  echo -e "${RESET}"
 
-say "${WHITE}Project:${RESET}  ${CYAN}$PROJECT_DIR${RESET}"
-say "${WHITE}Started:${RESET}  ${GRAY}$(now)${RESET}"
+  say "${WHITE}Project:${RESET}  ${CYAN}$PROJECT_DIR${RESET}"
+  say "${WHITE}Started:${RESET}  ${GRAY}$(now)${RESET}"
+fi
 
 # Count files (robust prune + include patterns)
 EX_PRUNE=()
@@ -1591,7 +1660,7 @@ if ( set +o pipefail;
 fi
 
 # Tool detection
-echo ""
+say ""
 if check_ast_grep; then
   say "${GREEN}${CHECK} ast-grep available (${AST_GREP_CMD[*]}) - full AST analysis enabled${RESET}"
   write_ast_rules || true
@@ -2012,14 +2081,10 @@ fi
 # ═══════════════════════════════════════════════════════════════════════════
 # CATEGORY 15: AST-GREP RULE PACK FINDINGS (JSON/SARIF passthrough)
 # ═══════════════════════════════════════════════════════════════════════════
-if should_run 15; then
+if should_run 15 && [[ "$FORMAT" == "text" ]]; then
 print_header "15. AST-GREP RULE PACK FINDINGS"
-if [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_RULE_DIR" ]]; then
-  run_ast_rules || true
-  say "${DIM}${INFO} Above JSON/SARIF lines are ast-grep matches (id, message, severity, file/pos).${RESET}"
-  if [[ "$FORMAT" == "sarif" ]]; then
-    say "${DIM}${INFO} Tip: ${BOLD}${AST_GREP_CMD[*]} scan -r $AST_RULE_DIR \"$PROJECT_DIR\" --sarif > report.sarif${RESET}"
-  fi
+if [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_CONFIG_FILE" ]]; then
+  print_finding "info" 0 "AST rule pack staged" "Use --sarif-out=FILE or --json-out=FILE to save full ast-grep outputs"
 else
   say "${YELLOW}${WARN} ast-grep scan subcommand unavailable; rule-pack mode skipped.${RESET}"
 fi
@@ -2037,7 +2102,7 @@ if [[ "$RUN_BUILD" -eq 1 ]]; then
   # Maven compile
   if [[ "$HAS_MAVEN" -eq 1 && -f "$PROJECT_DIR/pom.xml" ]]; then
     MVN_BIN="${MVNW:-mvn}"
-    MVN_LOG="$(mktemp)"
+    MVN_LOG="$(mktemp_file ubs-java-mvn)"
     run_cmd_log "$MVN_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$MVN_BIN\" -q -e -T1C -DskipTests=true -DskipITs=true -Dmaven.test.skip.exec=true -Dspotbugs.skip=true -Dpmd.skip=true -Dcheckstyle.skip=true -Denforcer.skip=true -Dgpg.skip=true -Dlicense.skip=true -Drat.skip=true -Djacoco.skip=true -Danimal.sniffer.skip=true -Dskip.npm -Dskip.yarn -Dskip.node -DskipFrontend -Dfrontend.skip=true -U -B compile"
     mvn_ec=$(cat "$MVN_LOG.ec" 2>/dev/null || echo 0)
     w_e=$(count_warnings_errors_text "$MVN_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
@@ -2048,9 +2113,9 @@ if [[ "$RUN_BUILD" -eq 1 ]]; then
   # Gradle compile
   if [[ "$HAS_GRADLE" -eq 1 && ( -f "$PROJECT_DIR/build.gradle" || -f "$PROJECT_DIR/build.gradle.kts" ) ]]; then
     GR_BIN="${GRADLEW:-gradle}"
-    GR_TASKS="$(mktemp)"
+    GR_TASKS="$(mktemp_file ubs-java-gradle-tasks)"
     run_cmd_log "$GR_TASKS" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q tasks --all"
-    GR_LOG="$(mktemp)"
+    GR_LOG="$(mktemp_file ubs-java-gradle)"
     run_cmd_log "$GR_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q classes testClasses -x test"
     gr_ec=$(cat "$GR_LOG.ec" 2>/dev/null || echo 0)
     w_e=$(count_warnings_errors_text "$GR_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
@@ -2059,17 +2124,17 @@ if [[ "$RUN_BUILD" -eq 1 ]]; then
 
     # Try optional lint tasks if they exist
     if grep -q "checkstyleMain" "$GR_TASKS"; then
-      CS_LOG="$(mktemp)"; run_cmd_log "$CS_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q checkstyleMain -x test"
+      CS_LOG="$(mktemp_file ubs-java-checkstyle)"; run_cmd_log "$CS_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q checkstyleMain -x test"
       w_e=$(count_warnings_errors_text "$CS_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
       if [[ "$e" -gt 0 ]]; then print_finding "warning" "$e" "Checkstyle issues (Gradle)"; fi
     fi
     if grep -q "pmdMain" "$GR_TASKS"; then
-      PMD_LOG="$(mktemp)"; run_cmd_log "$PMD_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q pmdMain -x test"
+      PMD_LOG="$(mktemp_file ubs-java-pmd)"; run_cmd_log "$PMD_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q pmdMain -x test"
       w_e=$(count_warnings_errors_text "$PMD_LOG"); w=$(echo "$w_e" | awk '{print $1}'); e=$(echo "$w_e" | awk '{print $2}')
       if [[ "$e" -gt 0 || "$w" -gt 0 ]]; then print_finding "warning" "$((w+e))" "PMD issues (Gradle)"; fi
     fi
     if grep -q "spotbugsMain" "$GR_TASKS"; then
-      SB_LOG="$(mktemp)"; run_cmd_log "$SB_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q spotbugsMain -x test"
+      SB_LOG="$(mktemp_file ubs-java-spotbugs)"; run_cmd_log "$SB_LOG" bash -lc "cd \"$PROJECT_DIR\" && \"$GR_BIN\" --no-daemon -q spotbugsMain -x test"
       if grep -qi "bug" "$SB_LOG"; then
         sb_cnt=$(grep -i "bug" "$SB_LOG" | wc -l | awk '{print $1+0}')
         print_finding "warning" "$sb_cnt" "SpotBugs reported potential issues"
@@ -3972,6 +4037,31 @@ fi
 # ═══════════════════════════════════════════════════════════════════════════
 # FINAL SUMMARY
 # ═══════════════════════════════════════════════════════════════════════════
+# restore pipefail + ERR trap for final reporting
+end_scan_section
+
+EXIT_CODE=0
+if [ "$CRITICAL_COUNT" -gt 0 ]; then EXIT_CODE=1; fi
+if [ "$FAIL_ON_WARNING" -eq 1 ] && [ $((CRITICAL_COUNT + WARNING_COUNT)) -gt 0 ]; then EXIT_CODE=1; fi
+
+if [[ -n "$SARIF_OUT" ]]; then
+  run_ast_rules sarif >"$SARIF_OUT" || true
+fi
+if [[ -n "$JSON_OUT" ]]; then
+  run_ast_rules json >"$JSON_OUT" || true
+fi
+
+if [[ "$FORMAT" == "json" ]]; then
+  emit_json_summary
+  IFS=${ORIG_IFS}
+  exit "$EXIT_CODE"
+fi
+if [[ "$FORMAT" == "sarif" ]]; then
+  emit_sarif
+  IFS=${ORIG_IFS}
+  exit "$EXIT_CODE"
+fi
+
 echo ""
 say "${BOLD}${WHITE}═══════════════════════════════════════════════════════════════════════════${RESET}"
 say "${BOLD}${CYAN}                    🎯 SCAN COMPLETE 🎯                                  ${RESET}"
@@ -4018,12 +4108,5 @@ fi
 say "${DIM}Add to CI: ./ubs --ci --fail-on-warning . > java-bug-scan.txt${RESET}"
 echo ""
 
-if [[ "$FORMAT" == "json" ]]; then
-  emit_json_summary
-fi
-
-EXIT_CODE=0
-if [ "$CRITICAL_COUNT" -gt 0 ]; then EXIT_CODE=1; fi
-if [ "$FAIL_ON_WARNING" -eq 1 ] && [ $((CRITICAL_COUNT + WARNING_COUNT)) -gt 0 ]; then EXIT_CODE=1; fi
 IFS=${ORIG_IFS}
 exit "$EXIT_CODE"

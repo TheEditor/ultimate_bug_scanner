@@ -27,6 +27,17 @@ while IFS='=' read -r key value; do
   fi
 done < <(sed -n '/^declare -A MODULE_CHECKSUMS=/,/^)/p' ubs | grep '^\s*\[')
 
+# Extract helper checksums from ubs script
+declare -A EXPECTED_HELPER_CHECKSUMS
+helper_key_re="\\[[[:space:]]*['\\\"]([^'\\\"]+)['\\\"][[:space:]]*\\]"
+while IFS='=' read -r key value; do
+  if [[ $key =~ $helper_key_re ]]; then
+    rel="${BASH_REMATCH[1]}"
+    checksum=$(echo "$value" | sed "s/['\"]//g" | tr -d ' ')
+    EXPECTED_HELPER_CHECKSUMS[$rel]=$checksum
+  fi
+done < <(sed -n '/^declare -A HELPER_CHECKSUMS=/,/^)/p' ubs | grep '^\s*\[')
+
 # Verify each module
 FAILED=0
 for module in modules/ubs-*.sh; do
@@ -60,16 +71,51 @@ for module in modules/ubs-*.sh; do
   fi
 done
 
+echo ""
+echo "Verifying helper checksums..."
+for helper in modules/helpers/*; do
+  if [[ ! -f "$helper" ]]; then
+    continue
+  fi
+
+  rel="helpers/$(basename "$helper")"
+
+  # Calculate actual checksum
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual=$(sha256sum "$helper" | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    actual=$(shasum -a 256 "$helper" | awk '{print $1}')
+  else
+    echo -e "${RED}ERROR: No checksum tool found (sha256sum or shasum required)${NC}"
+    exit 1
+  fi
+
+  expected="${EXPECTED_HELPER_CHECKSUMS[$rel]:-MISSING}"
+
+  if [[ "$expected" == "MISSING" ]]; then
+    echo -e "${RED}✗ CHECKSUM MISSING: ubs HELPER_CHECKSUMS[$rel]${NC}"
+    echo -e "  File:     $helper"
+    echo -e "  Actual:   $actual"
+    FAILED=1
+  elif [[ "$actual" != "$expected" ]]; then
+    echo -e "${RED}✗ CHECKSUM MISMATCH: $helper${NC}"
+    echo -e "  Expected: $expected"
+    echo -e "  Actual:   $actual"
+    FAILED=1
+  else
+    echo -e "${GREEN}✓ $helper${NC}"
+  fi
+done
+
 if [[ $FAILED -eq 1 ]]; then
   echo ""
   echo -e "${RED}╔════════════════════════════════════════════════════════════╗${NC}"
   echo -e "${RED}║  CHECKSUM VERIFICATION FAILED                              ║${NC}"
   echo -e "${RED}║                                                            ║${NC}"
-  echo -e "${RED}║  Module checksums do NOT match ubs script!                 ║${NC}"
+  echo -e "${RED}║  Checksums do NOT match ubs script!                        ║${NC}"
   echo -e "${RED}║  This means the tool will fail for end users.              ║${NC}"
   echo -e "${RED}║                                                            ║${NC}"
-  echo -e "${RED}║  Fix: ./scripts/update_checksums.sh                        ║${NC}"
-  echo -e "${RED}║  Then: git add ubs && git commit --amend                   ║${NC}"
+  echo -e "${RED}║  Fix: update checksums in ubs                              ║${NC}"
   echo -e "${RED}╚════════════════════════════════════════════════════════════╝${NC}"
   exit 1
 fi

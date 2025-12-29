@@ -240,6 +240,12 @@ done
 # CI auto-detect + color override
 if [[ -n "${CI:-}" ]]; then CI_MODE=1; fi
 
+# Machine formats must keep stdout clean and timestamps stable.
+if [[ "$FORMAT" == "json" || "$FORMAT" == "sarif" ]]; then
+  QUIET=1
+  CI_MODE=1
+fi
+
 USE_COLOR=1
 if [[ -n "${NO_COLOR:-}" || ! -t 1 ]]; then USE_COLOR=0; fi
 if [[ "$NO_COLOR_FLAG" -eq 1 ]]; then USE_COLOR=0; fi
@@ -256,7 +262,6 @@ fi
 CHECK="✓"; CROSS="✗"; WARN="⚠"; INFO="ℹ"; ARROW="→"; BULLET="•"; MAGNIFY="🔍"; BUG="🐛"; FIRE="🔥"; SPARKLE="✨"; HAMMER="🔧"
 
 DATE_FMT='%Y-%m-%d %H:%M:%S'
-if [[ "$CI_MODE" -eq 1 ]]; then DATE_CMD="date -u '+%Y-%m-%dT%H:%M:%SZ'"; else DATE_CMD="date '+$DATE_FMT'"; fi
 
 # Redirect output early to capture everything (text mode only; json/sarif should remain clean stdout)
 if [[ -n "${OUTPUT_FILE}" && "$FORMAT" == "text" ]]; then exec > >(tee "${OUTPUT_FILE}") 2>&1; fi
@@ -287,6 +292,7 @@ GO_WORK_FILES=""
 HAS_AST_GREP=0
 AST_GREP_CMD=()      # array-safe
 AST_RULE_DIR=""      # created later if ast-grep exists
+AST_CONFIG_FILE=""   # sgconfig.yml for scanning the generated rule pack
 
 # ────────────────────────────────────────────────────────────────────────────
 # Search engine configuration (rg if available, else grep) + include/exclude
@@ -333,7 +339,13 @@ fi
 count_lines() { awk 'END{print (NR+0)}'; }
 wc_num(){ wc -l | awk '{print $1+0}'; }
 
-now() { eval "$DATE_CMD"; }
+now() {
+  if [[ "$CI_MODE" -eq 1 ]]; then
+    command date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || command date '+%Y-%m-%dT%H:%M:%SZ'
+  else
+    command date "+$DATE_FMT"
+  fi
+}
 
 # ────────────────────────────────────────────────────────────────────────────
 # Helper Functions
@@ -341,6 +353,23 @@ now() { eval "$DATE_CMD"; }
 maybe_clear() { if [[ -t 1 && "$CI_MODE" -eq 0 && "$QUIET" -eq 0 ]]; then clear || true; fi; }
 
 say() { [[ "$QUIET" -eq 1 ]] && return 0; echo -e "$*"; }
+
+json_escape() {
+  local s="${1-}"
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+emit_json_summary() {
+  local ts
+  ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%SZ')"
+  printf '{"project":"%s","timestamp":"%s","files":%s,"critical":%s,"warning":%s,"info":%s,"version":"%s"}\n' \
+    "$(json_escape "$PROJECT_DIR")" "$ts" "$TOTAL_FILES" "$CRITICAL_COUNT" "$WARNING_COUNT" "$INFO_COUNT" "$(json_escape "$VERSION")"
+}
 
 diag() {
   if [[ "$FORMAT" == "text" ]]; then
@@ -581,13 +610,20 @@ message: "goroutine body ignores returned error; handle it or propagate via chan
 YAML
 
   tmp_json="$(mktemp -t go_async_matches.XXXXXX.json 2>/dev/null || mktemp -t go_async_matches.XXXXXX)"
-  if ! "${AST_GREP_CMD[@]}" scan -r "$rule_dir" "$PROJECT_DIR" --json 2>/dev/null >"$tmp_json"; then
-    rm -rf "$rule_dir"
+  local code=0
+  if "${AST_GREP_CMD[@]}" scan --rule "$rule_dir/go.async.goroutine-err-no-check.yml" "$PROJECT_DIR" --json 2>/dev/null >"$tmp_json"; then
+    code=0
+  else
+    code=$?
+  fi
+  # Exit 1 indicates error-level diagnostics; treat as success for parsing purposes.
+  if [[ "$code" -ne 0 && "$code" -ne 1 ]]; then
+    [[ -n "$rule_dir" && "$rule_dir" != "/" && "$rule_dir" != "." ]] && rm -rf -- "$rule_dir" 2>/dev/null || true
     rm -f "$tmp_json"
     print_finding "info" 0 "ast-grep scan failed" "Unable to compute async error coverage"
     return
   fi
-  rm -rf "$rule_dir"
+  [[ -n "$rule_dir" && "$rule_dir" != "/" && "$rule_dir" != "." ]] && rm -rf -- "$rule_dir" 2>/dev/null || true
 
   if ! [[ -s "$tmp_json" ]]; then
     rm -f "$tmp_json"
@@ -939,7 +975,8 @@ setup_baseline_capture() {
 # ────────────────────────────────────────────────────────────────────────────
 cleanup() {
   local ec=$?
-  [[ -n "${AST_RULE_DIR:-}" ]] && rm -rf "$AST_RULE_DIR" 2>/dev/null || true
+  [[ -n "${AST_RULE_DIR:-}" && "${AST_RULE_DIR:-}" != "/" && "${AST_RULE_DIR:-}" != "." ]] && rm -rf -- "$AST_RULE_DIR" 2>/dev/null || true
+  [[ -n "${AST_CONFIG_FILE:-}" ]] && rm -f "$AST_CONFIG_FILE" 2>/dev/null || true
   [[ -n "${AST_JSON:-}" ]] && rm -f "$AST_JSON" 2>/dev/null || true
   [[ -n "${BASELINE_TMP:-}" ]] && rm -f "$BASELINE_TMP" 2>/dev/null || true
   exit "$ec"
@@ -1010,13 +1047,31 @@ index_project() {
 # ast-grep JSON caching + robust counting
 # ────────────────────────────────────────────────────────────────────────────
 ensure_ast_scan_json(){
-  [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_RULE_DIR" ]] || return 1
+  [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_RULE_DIR" && -n "$AST_CONFIG_FILE" && -f "$AST_CONFIG_FILE" ]] || return 1
   [[ -n "$AST_JSON" && -f "$AST_JSON" ]] && return 0
   AST_JSON="$(mktemp -t ag_json.XXXXXX.json 2>/dev/null || mktemp -t ag_json.XXXXXX)"
-  if "${AST_GREP_CMD[@]}" scan -r "$AST_RULE_DIR" "$PROJECT_DIR" --json 2>/dev/null >"$AST_JSON"; then
+  local err
+  err="$(mktemp -t ubs-go-ast-grep.err.XXXXXX 2>/dev/null || mktemp -t ubs-go-ast-grep.err.XXXXXX)"
+  local code=0
+  if "${AST_GREP_CMD[@]}" scan -c "$AST_CONFIG_FILE" "$PROJECT_DIR" --json >"$AST_JSON" 2>"$err"; then
+    code=0
+  else
+    code=$?
+  fi
+
+  # `ast-grep scan` returns exit 1 when error-level diagnostics are found.
+  # Treat that as a successful scan so UBS can still parse findings.
+  if [[ "$code" -eq 0 || "$code" -eq 1 ]]; then
+    rm -f "$err" 2>/dev/null || true
     AST_SCAN_OK=1
     return 0
   fi
+
+  if [[ -s "$err" ]]; then
+    diag "${YELLOW}${WARN}${RESET} ast-grep scan failed (exit $code); AST-based rules disabled"
+    sed -n '1,40p' "$err" 1>&2 || true
+  fi
+  rm -f "$err" 2>/dev/null || true
   AST_SCAN_OK=0
   rm -f "$AST_JSON"
   AST_JSON=""
@@ -1040,22 +1095,13 @@ except Exception:
     print(0)
     sys.exit(0)
 
-out = []
+count = 0
 def walk(o):
+    global count
     if isinstance(o, dict):
-        rr = o.get("id") or o.get("rule_id") or o.get("ruleId")
-        if isinstance(rr, str) and ("range" in o) and ("file" in o or "path" in o):
-            if rr == target_id:
-                f = o.get("file") or o.get("path") or "?"
-                rng = o.get("range") or {}
-                start = rng.get("start") or {}
-                line = int(start.get("row", 0)) + 1
-                text = o.get("text") or o.get("snippet") or ""
-                text = " ".join(str(text).split())
-                if text:
-                    out.append((f"{f}:{line}", text[:220]))
-                else:
-                    out.append((f"{f}:{line}", ""))
+        rr = o.get("ruleId") or o.get("id") or o.get("rule_id")
+        if isinstance(rr, str) and rr == target_id and ("range" in o) and ("file" in o or "path" in o):
+            count += 1
         for v in o.values():
             walk(v)
     elif isinstance(o, list):
@@ -1063,11 +1109,10 @@ def walk(o):
             walk(it)
 
 walk(data)
-for loc, code in out:
-    print(loc + "\t" + code)
+print(count)
 PY
   else
-    grep -o "\"id\"[[:space:]]*:[[:space:]]*\"${rid//\//\\/}\"" "$AST_JSON" 2>/dev/null | wc_num
+    grep -o "\"ruleId\"[[:space:]]*:[[:space:]]*\"${rid//\//\\/}\"" "$AST_JSON" 2>/dev/null | wc_num
   fi
 }
 
@@ -1112,6 +1157,11 @@ check_ast_grep() {
 write_ast_rules() {
   [[ "$HAS_AST_GREP" -eq 1 ]] || return 0
   AST_RULE_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t go_ag_rules.XXXXXX)"
+  AST_CONFIG_FILE="$(mktemp -t ubs-go-sgconfig.XXXXXX 2>/dev/null || mktemp -t ubs-go-sgconfig.XXXXXX)"
+  cat >"$AST_CONFIG_FILE" <<YAML
+ruleDirs:
+  - "$AST_RULE_DIR"
+YAML
   if [[ -n "$USER_RULE_DIR" && -d "$USER_RULE_DIR" ]]; then
     cp -R "$USER_RULE_DIR"/. "$AST_RULE_DIR"/ 2>/dev/null || true
   fi
@@ -1164,6 +1214,7 @@ YAML
 id: go.loop-var-capture
 language: go
 rule:
+  kind: for_statement
   pattern: |
     for $I := range $$ {
       go func() { $$ $I $$ }()
@@ -1180,7 +1231,7 @@ rule:
     select { $$ }
   not:
     has:
-      pattern: default:
+      pattern: "default:"
 severity: info
 message: "select without a default may block indefinitely; confirm this is intended or add a timeout/default."
 YAML
@@ -1255,10 +1306,14 @@ id: go.http-default-client
 language: go
 rule:
   any:
-    - pattern: http.Get($$)
-    - pattern: http.Post($$)
-    - pattern: http.Head($$)
-    - pattern: http.DefaultClient.Do($$)
+    - kind: call_expression
+      pattern: http.Get($$)
+    - kind: call_expression
+      pattern: http.Post($$)
+    - kind: call_expression
+      pattern: http.Head($$)
+    - kind: call_expression
+      pattern: http.DefaultClient.Do($$)
 severity: warning
 message: "Default http.Client has no Timeout; prefer custom client with Timeout or context-aware requests."
 YAML
@@ -1267,6 +1322,7 @@ YAML
 id: go.http-newrequest-without-context
 language: go
 rule:
+  kind: call_expression
   pattern: http.NewRequest($$)
 severity: info
 message: "Prefer http.NewRequestWithContext(ctx, ...) to propagate cancellation."
@@ -1276,6 +1332,7 @@ YAML
 id: go.exec-command-without-context
 language: go
 rule:
+  kind: call_expression
   pattern: exec.Command($$)
 severity: info
 message: "Prefer exec.CommandContext(ctx, ...) to enforce timeouts and cancellation."
@@ -1288,7 +1345,7 @@ rule:
   pattern: http.Client{$$}
   not:
     has:
-      pattern: Timeout: $X
+      pattern: "Timeout: $X"
 severity: warning
 message: "http.Client without Timeout configured."
 YAML
@@ -1300,10 +1357,10 @@ rule:
   pattern: http.Server{$$}
   not:
     any:
-      - has: { pattern: ReadTimeout: $X }
-      - has: { pattern: WriteTimeout: $X }
-      - has: { pattern: IdleTimeout: $X }
-      - has: { pattern: ReadHeaderTimeout: $X }
+      - has: { pattern: "ReadTimeout: $X" }
+      - has: { pattern: "WriteTimeout: $X" }
+      - has: { pattern: "IdleTimeout: $X" }
+      - has: { pattern: "ReadHeaderTimeout: $X" }
 severity: info
 message: "http.Server constructed without timeouts; vulnerable to slowloris and resource exhaustion."
 YAML
@@ -1315,8 +1372,8 @@ rule:
   pattern: &cfg tls.Config{$$}
   not:
     any:
-      - has: { pattern: MinVersion: tls.VersionTLS12 }
-      - has: { pattern: MinVersion: tls.VersionTLS13 }
+      - has: { pattern: "MinVersion: tls.VersionTLS12" }
+      - has: { pattern: "MinVersion: tls.VersionTLS13" }
 severity: info
 message: "tls.Config without MinVersion; set to at least tls.VersionTLS12 (prefer TLS 1.3)."
 YAML
@@ -1326,6 +1383,7 @@ YAML
 id: go.time-tick
 language: go
 rule:
+  kind: call_expression
   pattern: time.Tick($$)
 severity: warning
 message: "time.Tick leaks; prefer time.NewTicker and Stop() it."
@@ -1335,6 +1393,7 @@ YAML
 id: go.time-after-in-loop
 language: go
 rule:
+  kind: call_expression
   pattern: time.After($$)
   inside:
     kind: for_statement
@@ -1348,12 +1407,19 @@ id: go.json-decode-without-disallow
 language: go
 rule:
   any:
-    - pattern: json.NewDecoder($R).Decode($V)
-    - pattern: |
-        $DEC := json.NewDecoder($R)
-        $DEC.Decode($V)
+    - kind: call_expression
+      pattern: json.NewDecoder($R).Decode($V)
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $DEC := json.NewDecoder($R)
+          $DEC.Decode($V)
+          $$$
+        }
   not:
     has:
+      kind: call_expression
       pattern: DisallowUnknownFields()
 severity: info
 message: "json.Decoder used without DisallowUnknownFields; may hide input mistakes (heuristic)."
@@ -1379,7 +1445,7 @@ language: go
 rule:
   pattern: &tls http.Transport{ $$ }
   has:
-    pattern: InsecureSkipVerify: true
+    pattern: "InsecureSkipVerify: true"
 severity: warning
 message: "TLS InsecureSkipVerify=true disables cert verification."
 YAML
@@ -1407,6 +1473,7 @@ YAML
 id: go.ioutil-deprecated
 language: go
 rule:
+  kind: call_expression
   pattern: ioutil.$FN($$)
 severity: info
 message: "ioutil package is deprecated; prefer io/os equivalents."
@@ -1438,51 +1505,126 @@ id: go.http.defer-body-before-err-check
 language: go
 rule:
   any:
-    - pattern: |
-        $RESP, $ERR := $CLIENT.Do($REQ)
-        defer $RESP.Body.Close()
-    - pattern: |
-        $RESP, $ERR = $CLIENT.Do($REQ)
-        defer $RESP.Body.Close()
-    - pattern: |
-        $RESP, $ERR := $CLIENT.Get($URL)
-        defer $RESP.Body.Close()
-    - pattern: |
-        $RESP, $ERR = $CLIENT.Get($URL)
-        defer $RESP.Body.Close()
-    - pattern: |
-        $RESP, $ERR := http.Get($URL)
-        defer $RESP.Body.Close()
-    - pattern: |
-        $RESP, $ERR = http.Get($URL)
-        defer $RESP.Body.Close()
-    - pattern: |
-        $RESP, $ERR := http.Head($URL)
-        defer $RESP.Body.Close()
-    - pattern: |
-        $RESP, $ERR = http.Head($URL)
-        defer $RESP.Body.Close()
-    - pattern: |
-        $RESP, $ERR := http.Post($$)
-        defer $RESP.Body.Close()
-    - pattern: |
-        $RESP, $ERR = http.Post($$)
-        defer $RESP.Body.Close()
-    - pattern: |
-        $RESP, $ERR := http.PostForm($URL, $DATA)
-        defer $RESP.Body.Close()
-    - pattern: |
-        $RESP, $ERR = http.PostForm($URL, $DATA)
-        defer $RESP.Body.Close()
-    - pattern: |
-        $RESP, $ERR := $CLIENT.Do($REQ)
-        defer func() { _ = $RESP.Body.Close() }()
-    - pattern: |
-        $RESP, $ERR := http.Get($URL)
-        defer func() { _ = $RESP.Body.Close() }()
-    - pattern: |
-        $RESP, $ERR := http.Post($$)
-        defer func() { _ = $RESP.Body.Close() }()
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $RESP, $ERR := $CLIENT.Do($REQ)
+          defer $RESP.Body.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $RESP, $ERR = $CLIENT.Do($REQ)
+          defer $RESP.Body.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $RESP, $ERR := $CLIENT.Get($URL)
+          defer $RESP.Body.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $RESP, $ERR = $CLIENT.Get($URL)
+          defer $RESP.Body.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $RESP, $ERR := http.Get($URL)
+          defer $RESP.Body.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $RESP, $ERR = http.Get($URL)
+          defer $RESP.Body.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $RESP, $ERR := http.Head($URL)
+          defer $RESP.Body.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $RESP, $ERR = http.Head($URL)
+          defer $RESP.Body.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $RESP, $ERR := http.Post($$)
+          defer $RESP.Body.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $RESP, $ERR = http.Post($$)
+          defer $RESP.Body.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $RESP, $ERR := http.PostForm($URL, $DATA)
+          defer $RESP.Body.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $RESP, $ERR = http.PostForm($URL, $DATA)
+          defer $RESP.Body.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $RESP, $ERR := $CLIENT.Do($REQ)
+          defer func() { _ = $RESP.Body.Close() }()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $RESP, $ERR := http.Get($URL)
+          defer func() { _ = $RESP.Body.Close() }()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $RESP, $ERR := http.Post($$)
+          defer func() { _ = $RESP.Body.Close() }()
+          $$$
+        }
 severity: error
 message: "defer resp.Body.Close() occurs before checking err; resp may be nil and will panic. Check err first, then defer Close()."
 YAML
@@ -1492,24 +1634,54 @@ id: go.defer-close-before-err-check
 language: go
 rule:
   any:
-    - pattern: |
-        $F, $ERR := os.Open($P)
-        defer $F.Close()
-    - pattern: |
-        $F, $ERR := os.Create($P)
-        defer $F.Close()
-    - pattern: |
-        $F, $ERR := os.OpenFile($P, $M, $PERM)
-        defer $F.Close()
-    - pattern: |
-        $F, $ERR = os.Open($P)
-        defer $F.Close()
-    - pattern: |
-        $F, $ERR = os.Create($P)
-        defer $F.Close()
-    - pattern: |
-        $F, $ERR = os.OpenFile($P, $M, $PERM)
-        defer $F.Close()
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $F, $ERR := os.Open($P)
+          defer $F.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $F, $ERR := os.Create($P)
+          defer $F.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $F, $ERR := os.OpenFile($P, $M, $PERM)
+          defer $F.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $F, $ERR = os.Open($P)
+          defer $F.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $F, $ERR = os.Create($P)
+          defer $F.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $F, $ERR = os.OpenFile($P, $M, $PERM)
+          defer $F.Close()
+          $$$
+        }
 severity: error
 message: "defer f.Close() occurs before checking err; f may be nil or stale and will panic/close the wrong handle. Check err first, then defer Close()."
 YAML
@@ -1519,24 +1691,54 @@ id: go.sql.defer-rows-close-before-err-check
 language: go
 rule:
   any:
-    - pattern: |
-        $ROWS, $ERR := $DB.Query($$)
-        defer $ROWS.Close()
-    - pattern: |
-        $ROWS, $ERR := $DB.QueryContext($CTX, $$)
-        defer $ROWS.Close()
-    - pattern: |
-        $ROWS, $ERR = $DB.Query($$)
-        defer $ROWS.Close()
-    - pattern: |
-        $ROWS, $ERR = $DB.QueryContext($CTX, $$)
-        defer $ROWS.Close()
-    - pattern: |
-        $ROWS, $ERR := $DB.Query($$)
-        defer func() { _ = $ROWS.Close() }()
-    - pattern: |
-        $ROWS, $ERR := $DB.QueryContext($CTX, $$)
-        defer func() { _ = $ROWS.Close() }()
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $ROWS, $ERR := $DB.Query($$)
+          defer $ROWS.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $ROWS, $ERR := $DB.QueryContext($CTX, $$)
+          defer $ROWS.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $ROWS, $ERR = $DB.Query($$)
+          defer $ROWS.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $ROWS, $ERR = $DB.QueryContext($CTX, $$)
+          defer $ROWS.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $ROWS, $ERR := $DB.Query($$)
+          defer func() { _ = $ROWS.Close() }()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $ROWS, $ERR := $DB.QueryContext($CTX, $$)
+          defer func() { _ = $ROWS.Close() }()
+          $$$
+        }
 severity: error
 message: "defer rows.Close() occurs before checking err; rows may be nil and will panic. Check err first, then defer Close()."
 YAML
@@ -1568,17 +1770,22 @@ language: go
 rule:
   all:
     - any:
-        - pattern: $TX, $ERR := $DB.Begin($$)
-        - pattern: $TX, $ERR := $DB.BeginTx($$)
-        - pattern: $TX, $ERR = $DB.Begin($$)
-        - pattern: $TX, $ERR = $DB.BeginTx($$)
+        - kind: short_var_declaration
+          pattern: $TX, $ERR := $DB.Begin($$)
+        - kind: short_var_declaration
+          pattern: $TX, $ERR := $DB.BeginTx($$)
+        - kind: assignment_statement
+          pattern: $TX, $ERR = $DB.Begin($$)
+        - kind: assignment_statement
+          pattern: $TX, $ERR = $DB.BeginTx($$)
     - not:
         inside:
           has:
             any:
-              - pattern: defer $TX.Rollback()
-              - pattern: defer func() { $TX.Rollback() }()
-              - pattern: defer func() { $TX.Rollback() }()
+              - kind: defer_statement
+                pattern: defer $TX.Rollback()
+              - kind: defer_statement
+                pattern: defer func() { $TX.Rollback() }()
 severity: warning
 message: "Transaction begun without a deferred tx.Rollback() in the containing scope."
 YAML
@@ -1607,8 +1814,8 @@ rule:
   pattern: http.Transport{$$}
   not:
     all:
-      - has: { pattern: ResponseHeaderTimeout: $X }
-      - has: { pattern: TLSHandshakeTimeout: $Y }
+      - has: { pattern: "ResponseHeaderTimeout: $X" }
+      - has: { pattern: "TLSHandshakeTimeout: $Y" }
 severity: info
 message: "http.Transport missing ResponseHeaderTimeout/TLSHandshakeTimeout (heuristic)."
 YAML
@@ -1621,7 +1828,7 @@ rule:
   pattern: http.Client{$$}
   not:
     has:
-      pattern: Transport: $T
+      pattern: "Transport: $T"
 severity: info
 message: "http.Client created without explicit Transport; defaults may be fine but review for timeouts/proxy settings."
 YAML
@@ -1633,25 +1840,40 @@ language: go
 rule:
   all:
     - any:
-        - pattern: $RESP, $ERR := $CLIENT.Do($REQ)
-        - pattern: $RESP, $ERR = $CLIENT.Do($REQ)
-        - pattern: $RESP, $ERR := http.Get($URL)
-        - pattern: $RESP, $ERR = http.Get($URL)
-        - pattern: $RESP, $ERR := http.Head($URL)
-        - pattern: $RESP, $ERR = http.Head($URL)
-        - pattern: $RESP, $ERR := http.Post($$)
-        - pattern: $RESP, $ERR = http.Post($$)
-        - pattern: $RESP, $ERR := http.PostForm($URL, $DATA)
-        - pattern: $RESP, $ERR = http.PostForm($URL, $DATA)
-        - pattern: $RESP, $ERR := $CLIENT.Get($URL)
-        - pattern: $RESP, $ERR = $CLIENT.Get($URL)
+        - kind: short_var_declaration
+          pattern: $RESP, $ERR := $CLIENT.Do($REQ)
+        - kind: assignment_statement
+          pattern: $RESP, $ERR = $CLIENT.Do($REQ)
+        - kind: short_var_declaration
+          pattern: $RESP, $ERR := http.Get($URL)
+        - kind: assignment_statement
+          pattern: $RESP, $ERR = http.Get($URL)
+        - kind: short_var_declaration
+          pattern: $RESP, $ERR := http.Head($URL)
+        - kind: assignment_statement
+          pattern: $RESP, $ERR = http.Head($URL)
+        - kind: short_var_declaration
+          pattern: $RESP, $ERR := http.Post($$)
+        - kind: assignment_statement
+          pattern: $RESP, $ERR = http.Post($$)
+        - kind: short_var_declaration
+          pattern: $RESP, $ERR := http.PostForm($URL, $DATA)
+        - kind: assignment_statement
+          pattern: $RESP, $ERR = http.PostForm($URL, $DATA)
+        - kind: short_var_declaration
+          pattern: $RESP, $ERR := $CLIENT.Get($URL)
+        - kind: assignment_statement
+          pattern: $RESP, $ERR = $CLIENT.Get($URL)
     - not:
         inside:
           has:
             any:
-              - pattern: defer $RESP.Body.Close()
-              - pattern: defer func() { $RESP.Body.Close() }()
-              - pattern: defer func() { _ = $RESP.Body.Close() }()
+              - kind: defer_statement
+                pattern: defer $RESP.Body.Close()
+              - kind: defer_statement
+                pattern: defer func() { $RESP.Body.Close() }()
+              - kind: defer_statement
+                pattern: defer func() { _ = $RESP.Body.Close() }()
 severity: warning
 message: "HTTP response body not obviously closed; defer resp.Body.Close() on success to avoid leaking connections."
 YAML
@@ -1677,10 +1899,12 @@ id: go.resource.timer-not-drained
 language: go
 rule:
   all:
-    - pattern: $T := time.NewTimer($$)
+    - kind: short_var_declaration
+      pattern: $T := time.NewTimer($$)
     - not:
         inside:
           has:
+            kind: expression_statement
             pattern: <-$T.C
 severity: info
 message: "time.NewTimer created but channel never drained; if Stop() fails, timer may fire later (heuristic)."
@@ -1817,21 +2041,46 @@ id: go.sql.defer-rollback-before-err-check
 language: go
 rule:
   any:
-    - pattern: |
-        $TX, $ERR := $DB.Begin($$)
-        defer $TX.Rollback()
-    - pattern: |
-        $TX, $ERR := $DB.BeginTx($$)
-        defer $TX.Rollback()
-    - pattern: |
-        $TX, $ERR = $DB.Begin($$)
-        defer $TX.Rollback()
-    - pattern: |
-        $TX, $ERR = $DB.BeginTx($$)
-        defer $TX.Rollback()
-    - pattern: |
-        $TX, $ERR := $DB.BeginTx($$)
-        defer func() { _ = $TX.Rollback() }()
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $TX, $ERR := $DB.Begin($$)
+          defer $TX.Rollback()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $TX, $ERR := $DB.BeginTx($$)
+          defer $TX.Rollback()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $TX, $ERR = $DB.Begin($$)
+          defer $TX.Rollback()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $TX, $ERR = $DB.BeginTx($$)
+          defer $TX.Rollback()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $TX, $ERR := $DB.BeginTx($$)
+          defer func() { _ = $TX.Rollback() }()
+          $$$
+        }
 severity: error
 message: "defer tx.Rollback() occurs before checking err; tx may be nil/stale and will panic/rollback wrong tx. Check err first, then defer Rollback()."
 YAML
@@ -1842,36 +2091,61 @@ id: go.sql.defer-rollback-delayed
 language: go
 rule:
   any:
-    - pattern: |
-        $TX, $ERR := $DB.Begin($$)
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        defer $TX.Rollback()
-    - pattern: |
-        $TX, $ERR := $DB.BeginTx($$)
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        defer $TX.Rollback()
-    - pattern: |
-        $TX, $ERR = $DB.Begin($$)
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        defer $TX.Rollback()
-    - pattern: |
-        $TX, $ERR = $DB.BeginTx($$)
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        defer $TX.Rollback()
-    - pattern: |
-        $TX, $ERR := $DB.BeginTx($$)
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        defer func() { _ = $TX.Rollback() }()
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $TX, $ERR := $DB.Begin($$)
+          if $ERR != nil { $$$ }
+          $S
+          $$$
+          defer $TX.Rollback()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $TX, $ERR := $DB.BeginTx($$)
+          if $ERR != nil { $$$ }
+          $S
+          $$$
+          defer $TX.Rollback()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $TX, $ERR = $DB.Begin($$)
+          if $ERR != nil { $$$ }
+          $S
+          $$$
+          defer $TX.Rollback()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $TX, $ERR = $DB.BeginTx($$)
+          if $ERR != nil { $$$ }
+          $S
+          $$$
+          defer $TX.Rollback()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $TX, $ERR := $DB.BeginTx($$)
+          if $ERR != nil { $$$ }
+          $S
+          $$$
+          defer func() { _ = $TX.Rollback() }()
+          $$$
+        }
 severity: warning
 message: "defer tx.Rollback() is not placed immediately after a successful Begin; early returns between may leak/skip rollback."
 YAML
@@ -1883,18 +2157,26 @@ language: go
 rule:
   all:
     - any:
-        - pattern: $ROWS, $ERR := $DB.Query($$)
-        - pattern: $ROWS, $ERR := $DB.QueryContext($CTX, $$)
-        - pattern: $ROWS, $ERR = $DB.Query($$)
-        - pattern: $ROWS, $ERR = $DB.QueryContext($CTX, $$)
+        - kind: short_var_declaration
+          pattern: $ROWS, $ERR := $DB.Query($$)
+        - kind: short_var_declaration
+          pattern: $ROWS, $ERR := $DB.QueryContext($CTX, $$)
+        - kind: assignment_statement
+          pattern: $ROWS, $ERR = $DB.Query($$)
+        - kind: assignment_statement
+          pattern: $ROWS, $ERR = $DB.QueryContext($CTX, $$)
     - not:
         inside:
           has:
             any:
-              - pattern: defer $ROWS.Close()
-              - pattern: $ROWS.Close()
-              - pattern: defer func() { _ = $ROWS.Close() }()
-              - pattern: defer func() { $ROWS.Close() }()
+              - kind: defer_statement
+                pattern: defer $ROWS.Close()
+              - kind: expression_statement
+                pattern: $ROWS.Close()
+              - kind: defer_statement
+                pattern: defer func() { _ = $ROWS.Close() }()
+              - kind: defer_statement
+                pattern: defer func() { $ROWS.Close() }()
 severity: warning
 message: "sql.Rows from Query not obviously closed; defer rows.Close() after successful query."
 YAML
@@ -1905,36 +2187,61 @@ id: go.sql.defer-rows-close-delayed
 language: go
 rule:
   any:
-    - pattern: |
-        $ROWS, $ERR := $DB.Query($$)
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        defer $ROWS.Close()
-    - pattern: |
-        $ROWS, $ERR := $DB.QueryContext($CTX, $$)
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        defer $ROWS.Close()
-    - pattern: |
-        $ROWS, $ERR = $DB.Query($$)
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        defer $ROWS.Close()
-    - pattern: |
-        $ROWS, $ERR = $DB.QueryContext($CTX, $$)
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        defer $ROWS.Close()
-    - pattern: |
-        $ROWS, $ERR := $DB.QueryContext($CTX, $$)
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        defer func() { _ = $ROWS.Close() }()
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $ROWS, $ERR := $DB.Query($$)
+          if $ERR != nil { $$$ }
+          $S
+          $$$
+          defer $ROWS.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $ROWS, $ERR := $DB.QueryContext($CTX, $$)
+          if $ERR != nil { $$$ }
+          $S
+          $$$
+          defer $ROWS.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $ROWS, $ERR = $DB.Query($$)
+          if $ERR != nil { $$$ }
+          $S
+          $$$
+          defer $ROWS.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $ROWS, $ERR = $DB.QueryContext($CTX, $$)
+          if $ERR != nil { $$$ }
+          $S
+          $$$
+          defer $ROWS.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $ROWS, $ERR := $DB.QueryContext($CTX, $$)
+          if $ERR != nil { $$$ }
+          $S
+          $$$
+          defer func() { _ = $ROWS.Close() }()
+          $$$
+        }
 severity: info
 message: "defer rows.Close() is not placed immediately after a successful Query; early returns between may leak rows/connections."
 YAML
@@ -1945,42 +2252,72 @@ id: go.http.defer-body-close-delayed
 language: go
 rule:
   any:
-    - pattern: |
-        $RESP, $ERR := $CLIENT.Do($REQ)
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        defer $RESP.Body.Close()
-    - pattern: |
-        $RESP, $ERR := http.Get($URL)
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        defer $RESP.Body.Close()
-    - pattern: |
-        $RESP, $ERR := http.Post($$)
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        defer $RESP.Body.Close()
-    - pattern: |
-        $RESP, $ERR := http.Head($URL)
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        defer $RESP.Body.Close()
-    - pattern: |
-        $RESP, $ERR := http.PostForm($URL, $DATA)
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        defer $RESP.Body.Close()
-    - pattern: |
-        $RESP, $ERR := http.Get($URL)
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        defer func() { _ = $RESP.Body.Close() }()
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $RESP, $ERR := $CLIENT.Do($REQ)
+          if $ERR != nil { $$$ }
+          $S
+          $$$
+          defer $RESP.Body.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $RESP, $ERR := http.Get($URL)
+          if $ERR != nil { $$$ }
+          $S
+          $$$
+          defer $RESP.Body.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $RESP, $ERR := http.Post($$)
+          if $ERR != nil { $$$ }
+          $S
+          $$$
+          defer $RESP.Body.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $RESP, $ERR := http.Head($URL)
+          if $ERR != nil { $$$ }
+          $S
+          $$$
+          defer $RESP.Body.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $RESP, $ERR := http.PostForm($URL, $DATA)
+          if $ERR != nil { $$$ }
+          $S
+          $$$
+          defer $RESP.Body.Close()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          $RESP, $ERR := http.Get($URL)
+          if $ERR != nil { $$$ }
+          $S
+          $$$
+          defer func() { _ = $RESP.Body.Close() }()
+          $$$
+        }
 severity: info
 message: "defer resp.Body.Close() is not placed immediately after a successful request; early returns between may leak connections."
 YAML
@@ -1991,31 +2328,29 @@ id: go.context.cancel-defer-before-err-check
 language: go
 rule:
   any:
-    - pattern: |
-        defer $CANCEL()
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        $CANCEL()
-    - pattern: |
-        defer $CANCEL()
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        $CANCEL()
-    - pattern: |
-        defer func() { $CANCEL() }()
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        $CANCEL()
-    - pattern: |
-        defer func() { $CANCEL() }()
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        $CANCEL()
-severity: critical
+    - kind: block
+      pattern: |
+        {
+          $$$
+          defer $CANCEL()
+          if $ERR != nil { $$$ }
+          $S
+          $$$
+          $CANCEL()
+          $$$
+        }
+    - kind: block
+      pattern: |
+        {
+          $$$
+          defer func() { $CANCEL() }()
+          if $ERR != nil { $$$ }
+          $S
+          $$$
+          $CANCEL()
+          $$$
+        }
+severity: error
 message: "defer cancel() occurs before checking err; you may be deferring the wrong cancel (shadowing/reassign bug)."
 YAML
 
@@ -2025,136 +2360,80 @@ id: go.context.cancel-defer-in-if
 language: go
 rule:
   any:
-    - pattern: |
-        $CTX, $CANCEL := context.WithCancel($PARENT)
-        if $COND {
+    - kind: block
+      pattern: |
+        {
           $$$
-          defer $CANCEL()
-          $$$
-        }
-    - pattern: |
-        $CTX, $CANCEL := context.WithTimeout($PARENT, $DUR)
-        if $COND {
-          $$$
-          defer $CANCEL()
+          $CTX, $CANCEL := context.WithCancel($PARENT)
+          if $COND {
+            $$$
+            defer $CANCEL()
+            $$$
+          }
           $$$
         }
-    - pattern: |
-        $CTX, $CANCEL := context.WithDeadline($PARENT, $DL)
-        if $COND {
+    - kind: block
+      pattern: |
+        {
           $$$
-          defer $CANCEL()
-          $$$
-        }
-    - pattern: |
-        $CTX, $CANCEL = context.WithCancel($PARENT)
-        if $COND {
-          $$$
-          defer $CANCEL()
+          $CTX, $CANCEL := context.WithTimeout($PARENT, $DUR)
+          if $COND {
+            $$$
+            defer $CANCEL()
+            $$$
+          }
           $$$
         }
-    - pattern: |
-        $CTX, $CANCEL = context.WithTimeout($PARENT, $DUR)
-        if $COND {
+    - kind: block
+      pattern: |
+        {
           $$$
-          defer $CANCEL()
-          $$$
-        }
-    - pattern: |
-        $CTX, $CANCEL = context.WithDeadline($PARENT, $DL)
-        if $COND {
-          $$$
-          defer $CANCEL()
+          $CTX, $CANCEL := context.WithDeadline($PARENT, $DL)
+          if $COND {
+            $$$
+            defer $CANCEL()
+            $$$
+          }
           $$$
         }
-severity: warning
-message: "cancel() is deferred conditionally inside if; prefer unconditional defer cancel() immediately after With*."
-YAML
-
-  # Context: cancel() deferred conditionally inside if after With* assignment
-  cat >"$AST_RULE_DIR/go.context.cancel-defer-in-if.yml" <<'YAML'
-id: go.context.cancel-defer-in-if
-language: go
-rule:
-  any:
-    - pattern: |
-        $CTX, $CANCEL := context.WithCancel($PARENT)
-        if $COND {
+    - kind: block
+      pattern: |
+        {
           $$$
-          defer $CANCEL()
+          $CTX, $CANCEL = context.WithCancel($PARENT)
+          if $COND {
+            $$$
+            defer $CANCEL()
+            $$$
+          }
           $$$
         }
-    - pattern: |
-        $CTX, $CANCEL := context.WithTimeout($PARENT, $DUR)
-        if $COND {
+    - kind: block
+      pattern: |
+        {
           $$$
-          defer $CANCEL()
-          $$$
-        }
-    - pattern: |
-        $CTX, $CANCEL := context.WithDeadline($PARENT, $DL)
-        if $COND {
-          $$$
-          defer $CANCEL()
+          $CTX, $CANCEL = context.WithTimeout($PARENT, $DUR)
+          if $COND {
+            $$$
+            defer $CANCEL()
+            $$$
+          }
           $$$
         }
-    - pattern: |
-        $CTX, $CANCEL = context.WithCancel($PARENT)
-        if $COND {
+    - kind: block
+      pattern: |
+        {
           $$$
-          defer $CANCEL()
-          $$$
-        }
-    - pattern: |
-        $CTX, $CANCEL = context.WithTimeout($PARENT, $DUR)
-        if $COND {
-          $$$
-          defer $CANCEL()
-          $$$
-        }
-    - pattern: |
-        $CTX, $CANCEL = context.WithDeadline($PARENT, $DL)
-        if $COND {
-          $$$
-          defer $CANCEL()
+          $CTX, $CANCEL = context.WithDeadline($PARENT, $DL)
+          if $COND {
+            $$$
+            defer $CANCEL()
+            $$$
+          }
           $$$
         }
 severity: warning
 message: "cancel() is deferred conditionally inside if; prefer unconditional defer cancel() immediately after With*."
-YAML
-
-  # Context: cancel() deferred before err check (panic risk)
-  cat >"$AST_RULE_DIR/go.context.cancel-defer-before-err-check.yml" <<'YAML'
-id: go.context.cancel-defer-before-err-check
-language: go
-rule:
-  any:
-    - pattern: |
-        defer $CANCEL()
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        $CANCEL()
-    - pattern: |
-        defer $CANCEL()
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        $CANCEL()
-    - pattern: |
-        defer func() { $CANCEL() }()
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        $CANCEL()
-    - pattern: |
-        defer func() { $CANCEL() }()
-        if $ERR != nil { $$$ }
-        $S
-        $$$
-        $CANCEL()
-severity: critical
-message: "defer cancel() occurs before checking err; you may be deferring the wrong cancel (shadowing/reassign bug)."
 YAML
 
   # Ignored errors: blank identifier discards Write error
@@ -2163,13 +2442,14 @@ id: go.write-error-ignored
 language: go
 rule:
   any:
-    - all:
-        - pattern: $N, _ := $W.Write($$)
-        - inside:
-            kind: expression_statement
-    - pattern: $N, _ = $W.Write($$)
-    - pattern: _, _ := $W.Write($$)
-    - pattern: _, _ = $W.Write($$)
+    - kind: short_var_declaration
+      pattern: $N, _ := $W.Write($$)
+    - kind: assignment_statement
+      pattern: $N, _ = $W.Write($$)
+    - kind: short_var_declaration
+      pattern: _, _ := $W.Write($$)
+    - kind: assignment_statement
+      pattern: _, _ = $W.Write($$)
 severity: info
 message: "Write(...) error is ignored via blank identifier; consider handling/propagating the error."
 YAML
@@ -2180,9 +2460,8 @@ id: go.http.responsewriter-write-ignored
 language: go
 rule:
   all:
-    - pattern: $W.Write($$)
-    - inside:
-        kind: expression_statement
+    - kind: expression_statement
+      pattern: $W.Write($$)
     - inside:
         any:
           - pattern: func($W http.ResponseWriter, $R *http.Request) { $$$ }
@@ -2199,14 +2478,16 @@ id: go.fmt.fprintf-error-ignored
 language: go
 rule:
   any:
-    - all:
-        - pattern: fmt.Fprintf($$)
-        - inside:
-            kind: expression_statement
-    - pattern: $N, _ := fmt.Fprintf($$)
-    - pattern: $N, _ = fmt.Fprintf($$)
-    - pattern: _, _ := fmt.Fprintf($$)
-    - pattern: _, _ = fmt.Fprintf($$)
+    - kind: expression_statement
+      pattern: fmt.Fprintf($$)
+    - kind: short_var_declaration
+      pattern: $N, _ := fmt.Fprintf($$)
+    - kind: assignment_statement
+      pattern: $N, _ = fmt.Fprintf($$)
+    - kind: short_var_declaration
+      pattern: _, _ := fmt.Fprintf($$)
+    - kind: assignment_statement
+      pattern: _, _ = fmt.Fprintf($$)
 severity: info
 message: "fmt.Fprintf return error ignored; consider handling it (especially when writing to network/file)."
 YAML
@@ -2246,14 +2527,37 @@ YAML
 emit_sarif_rich() {
   local tmp
   tmp="$(mktemp -t ubs_sarif.XXXXXX.json 2>/dev/null || mktemp -t ubs_sarif.XXXXXX)"
-  if ! "${AST_GREP_CMD[@]}" scan -r "$AST_RULE_DIR" "$PROJECT_DIR" --sarif 2>/dev/null >"$tmp"; then
-    rm -f "$tmp" 2>/dev/null || true
-    return 1
+  local err
+  err="$(mktemp -t ubs-go-ast-grep.err.XXXXXX 2>/dev/null || mktemp -t ubs-go-ast-grep.err.XXXXXX)"
+  local code=0
+  if "${AST_GREP_CMD[@]}" scan -c "$AST_CONFIG_FILE" "$PROJECT_DIR" --format sarif >"$tmp" 2>"$err"; then
+    code=0
+  else
+    code=$?
+  fi
+
+  # ast-grep returns exit 1 when error-level diagnostics are found.
+  # SARIF is still valid and should be emitted.
+  if [[ "$code" -eq 0 || "$code" -eq 1 ]]; then
+    rm -f "$err" 2>/dev/null || true
+  else
+    if [[ -s "$err" ]]; then
+      diag "${RED}${CROSS}${RESET} ast-grep SARIF scan failed (exit $code)"
+      sed -n '1,80p' "$err" 1>&2 || true
+    else
+      diag "${RED}${CROSS}${RESET} ast-grep SARIF scan failed (exit $code)"
+    fi
+    rm -f "$tmp" "$err" 2>/dev/null || true
+    return "$code"
   fi
 
   # Optional enrichment (tags + helpUri) for GitHub code scanning friendliness
   if [[ "$SARIF_RICH" -ne 1 ]] || ! command -v python3 >/dev/null 2>&1; then
-    cat "$tmp"
+    if command -v jq >/dev/null 2>&1; then
+      jq '.["$schema"]="https://json.schemastore.org/sarif-2.1.0.json" | .version="2.1.0"' "$tmp" 2>/dev/null || cat "$tmp"
+    else
+      cat "$tmp"
+    fi
     rm -f "$tmp" 2>/dev/null || true
     return 0
   fi
@@ -2264,6 +2568,10 @@ import json, sys
 sarif_path = sys.argv[1]
 with open(sarif_path, "r", encoding="utf-8") as f:
     sarif = json.load(f)
+
+if isinstance(sarif, dict):
+    sarif["$schema"] = "https://json.schemastore.org/sarif-2.1.0.json"
+    sarif["version"] = "2.1.0"
 
 HELP_SNIPPETS = {
     "go.http.defer-body-before-err-check": """Safe pattern:
@@ -2412,7 +2720,31 @@ run_ast_rules_machine() {
   if [[ "$FORMAT" == "sarif" ]]; then
     emit_sarif_rich
   else
-    "${AST_GREP_CMD[@]}" scan -r "$AST_RULE_DIR" "$PROJECT_DIR" --json 2>/dev/null
+    local err
+    err="$(mktemp -t ubs-go-ast-grep.err.XXXXXX 2>/dev/null || mktemp -t ubs-go-ast-grep.err.XXXXXX)"
+    local tmp
+    tmp="$(mktemp -t ubs-go-ast-grep.json.XXXXXX 2>/dev/null || mktemp -t ubs-go-ast-grep.json.XXXXXX)"
+    local code=0
+    if "${AST_GREP_CMD[@]}" scan -c "$AST_CONFIG_FILE" "$PROJECT_DIR" --json >"$tmp" 2>"$err"; then
+      code=0
+    else
+      code=$?
+    fi
+
+    if [[ "$code" -eq 0 || "$code" -eq 1 ]]; then
+      cat "$tmp"
+      rm -f "$tmp" "$err" 2>/dev/null || true
+      return 0
+    else
+      if [[ -s "$err" ]]; then
+        diag "${RED}${CROSS}${RESET} ast-grep scan failed (exit $code)"
+        sed -n '1,80p' "$err" 1>&2 || true
+      else
+        diag "${RED}${CROSS}${RESET} ast-grep scan failed (exit $code)"
+      fi
+      rm -f "$tmp" "$err" 2>/dev/null || true
+      return "$code"
+    fi
   fi
 }
 
@@ -2573,12 +2905,14 @@ else
   fi
 fi
 
-# Machine-output mode: emit JSON/SARIF and exit with terse summary on stderr
-if [[ "$FORMAT" == "json" || "$FORMAT" == "sarif" ]]; then
+# Machine-output mode: emit SARIF and exit with terse summary on stderr
+if [[ "$FORMAT" == "sarif" ]]; then
+  AST_MACHINE_OK=0
   if [[ "$HAS_AST_GREP" -eq 1 && -n "$AST_RULE_DIR" ]]; then
-    run_ast_rules_machine
-  else
-    if [[ "$FORMAT" == "sarif" ]]; then
+    if run_ast_rules_machine; then
+      AST_MACHINE_OK=1
+    else
+      AST_MACHINE_OK=0
       cat <<'SARIF'
 {
   "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
@@ -2597,9 +2931,26 @@ if [[ "$FORMAT" == "json" || "$FORMAT" == "sarif" ]]; then
   ]
 }
 SARIF
-    else
-      echo '[]'
     fi
+  else
+    cat <<'SARIF'
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "ubs-golang",
+          "informationUri": "https://ast-grep.github.io/",
+          "rules": []
+        }
+      },
+      "results": []
+    }
+  ]
+}
+SARIF
   fi
   {
     echo ""
@@ -2608,7 +2959,17 @@ SARIF
     echo "  Files:   $TOTAL_FILES"
     echo "  Go:      $GO_FILES_COUNT"
   } 1>&2
-  exit 0
+  exit_code=0
+  if [[ "$AST_MACHINE_OK" -eq 0 && "$HAS_AST_GREP" -eq 1 && -n "$AST_RULE_DIR" ]]; then
+    exit_code=2
+  elif [[ -n "${AST_JSON:-}" && -f "$AST_JSON" ]] && command -v jq >/dev/null 2>&1; then
+    crit=$(jq '[.[]? | select((.severity // "") | ascii_downcase == "error")] | length' "$AST_JSON" 2>/dev/null || echo 0)
+    warn=$(jq '[.[]? | select((.severity // "") | ascii_downcase == "warning")] | length' "$AST_JSON" 2>/dev/null || echo 0)
+    crit=${crit:-0}; warn=${warn:-0}
+    if [[ "$FAIL_ON_WARNING" -eq 1 && $((crit + warn)) -gt 0 ]]; then exit_code=1; fi
+    if [[ "$FAIL_ON_WARNING" -eq 0 && "$crit" -gt 0 ]]; then exit_code=1; fi
+  fi
+  exit "$exit_code"
 fi
 
 # In text mode, run the broader heuristic scans
@@ -3245,9 +3606,10 @@ print_category "AST-detected: panic(), recover outside defer, time.Tick, time.Af
   "Codifies common pitfalls as precise AST rules"
 
 if [[ "$HAS_AST_GREP" -eq 1 && -f "$AST_JSON" ]]; then
-  say "${DIM}${INFO} ast-grep produced structured matches. Tally by rule id:${RESET}"
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - "$AST_JSON" <<'PY'
+  if [[ "$FORMAT" == "text" && "$QUIET" -eq 0 ]]; then
+    say "${DIM}${INFO} ast-grep produced structured matches. Tally by rule id:${RESET}"
+    if command -v python3 >/dev/null 2>&1; then
+      python3 - "$AST_JSON" <<'PY'
 import json, sys
 from collections import Counter
 
@@ -3274,16 +3636,19 @@ c = Counter(ids)
 for rid, n in sorted(c.items()):
     print(f"  • {rid:<44} {n:>5}")
 PY
-  else
-    ids=$(grep -o '"id"[[:space:]]*:[[:space:]]*"[^"]*"' "$AST_JSON" 2>/dev/null | sed -E 's/.*"id"[ ]*:[ ]*"([^"]*)".*/\1/' || true)
-    if [[ -n "$ids" ]]; then
-      printf "%s\n" "$ids" | sort | uniq -c | awk '{printf "  • %-40s %5d\n",$2,$1}'
     else
-      say "  (no matches)"
+      ids=$(grep -o '"id"[[:space:]]*:[[:space:]]*"[^"]*"' "$AST_JSON" 2>/dev/null | sed -E 's/.*"id"[ ]*:[ ]*"([^"]*)".*/\1/' || true)
+      if [[ -n "$ids" ]]; then
+        printf "%s\n" "$ids" | sort | uniq -c | awk '{printf "  • %-40s %5d\n",$2,$1}'
+      else
+        say "  (no matches)"
+      fi
     fi
   fi
 else
-  say "${YELLOW}${WARN} ast-grep not available; AST categories summarized via regex only.${RESET}"
+  if [[ "$FORMAT" == "text" && "$QUIET" -eq 0 ]]; then
+    say "${YELLOW}${WARN} ast-grep not available; AST categories summarized via regex only.${RESET}"
+  fi
 fi
 fi
 
@@ -3456,50 +3821,60 @@ fi
 # restore pipefail if we relaxed it
 end_scan_section
 
-# ═══════════════════════════════════════════════════════════════════════════
-# FINAL SUMMARY
-# ═══════════════════════════════════════════════════════════════════════════
+EXIT_CODE=0
+if [ "$CRITICAL_COUNT" -gt 0 ]; then EXIT_CODE=1; fi
+if [ "$FAIL_ON_WARNING" -eq 1 ] && [ $((CRITICAL_COUNT + WARNING_COUNT)) -gt 0 ]; then EXIT_CODE=1; fi
 
-echo ""
-say "${BOLD}${WHITE}═══════════════════════════════════════════════════════════════════════════${RESET}"
-say "${BOLD}${CYAN}                    🎯 SCAN COMPLETE 🎯                                  ${RESET}"
-say "${BOLD}${WHITE}═══════════════════════════════════════════════════════════════════════════${RESET}"
-echo ""
-
-say "${WHITE}${BOLD}Summary Statistics:${RESET}"
-say "  ${WHITE}Version:${RESET}        ${CYAN}$VERSION${RESET}"
-say "  ${WHITE}Files scanned:${RESET}  ${CYAN}$TOTAL_FILES${RESET}"
-say "  ${WHITE}Go files:${RESET}       ${CYAN}$GO_FILES_COUNT${RESET}"
-say "  ${WHITE}Test files:${RESET}     ${CYAN}$TEST_FILES_COUNT${RESET}"
-say "  ${RED}${BOLD}Critical issues:${RESET}  ${RED}$CRITICAL_COUNT${RESET}"
-say "  ${YELLOW}Warning issues:${RESET}   ${YELLOW}$WARNING_COUNT${RESET}"
-say "  ${BLUE}Info items:${RESET}       ${BLUE}$INFO_COUNT${RESET}"
-echo ""
-
-say "${BOLD}${WHITE}Priority Actions:${RESET}"
-if [ "$CRITICAL_COUNT" -gt 0 ]; then
-  say "  ${RED}${FIRE} ${BOLD}FIX CRITICAL ISSUES IMMEDIATELY${RESET}"
-  say "  ${DIM}These cause crashes, security vulnerabilities, or data corruption${RESET}"
-fi
-if [ "$WARNING_COUNT" -gt 0 ]; then
-  say "  ${YELLOW}${WARN} ${BOLD}Review and fix WARNING items${RESET}"
-  say "  ${DIM}These cause bugs, performance issues, or maintenance problems${RESET}"
-fi
-if [ "$INFO_COUNT" -gt 0 ]; then
-  say "  ${BLUE}${INFO} ${BOLD}Consider INFO suggestions${RESET}"
-  say "  ${DIM}Code quality improvements and best practices${RESET}"
+if [[ "$FORMAT" == "json" ]]; then
+  emit_json_summary
+  exit "$EXIT_CODE"
 fi
 
-if [ "$CRITICAL_COUNT" -eq 0 ] && [ "$WARNING_COUNT" -eq 0 ]; then
-  say "\n  ${GREEN}${BOLD}${SPARKLE} EXCELLENT! No critical or warning issues found ${SPARKLE}${RESET}"
-fi
+if [[ "$FORMAT" == "text" ]]; then
+  # ═══════════════════════════════════════════════════════════════════════════
+  # FINAL SUMMARY
+  # ═══════════════════════════════════════════════════════════════════════════
 
-echo ""
-say "${DIM}Scan completed at: $(now)${RESET}"
+  echo ""
+  say "${BOLD}${WHITE}═══════════════════════════════════════════════════════════════════════════${RESET}"
+  say "${BOLD}${CYAN}                    🎯 SCAN COMPLETE 🎯                                  ${RESET}"
+  say "${BOLD}${WHITE}═══════════════════════════════════════════════════════════════════════════${RESET}"
+  echo ""
 
-if [[ -n "$OUTPUT_FILE" ]]; then
-  say "${GREEN}${CHECK} Full report saved to: ${CYAN}$OUTPUT_FILE${RESET}"
-fi
+  say "${WHITE}${BOLD}Summary Statistics:${RESET}"
+  say "  ${WHITE}Version:${RESET}        ${CYAN}$VERSION${RESET}"
+  say "  ${WHITE}Files scanned:${RESET}  ${CYAN}$TOTAL_FILES${RESET}"
+  say "  ${WHITE}Go files:${RESET}       ${CYAN}$GO_FILES_COUNT${RESET}"
+  say "  ${WHITE}Test files:${RESET}     ${CYAN}$TEST_FILES_COUNT${RESET}"
+  say "  ${RED}${BOLD}Critical issues:${RESET}  ${RED}$CRITICAL_COUNT${RESET}"
+  say "  ${YELLOW}Warning issues:${RESET}   ${YELLOW}$WARNING_COUNT${RESET}"
+  say "  ${BLUE}Info items:${RESET}       ${BLUE}$INFO_COUNT${RESET}"
+  echo ""
+
+  say "${BOLD}${WHITE}Priority Actions:${RESET}"
+  if [ "$CRITICAL_COUNT" -gt 0 ]; then
+    say "  ${RED}${FIRE} ${BOLD}FIX CRITICAL ISSUES IMMEDIATELY${RESET}"
+    say "  ${DIM}These cause crashes, security vulnerabilities, or data corruption${RESET}"
+  fi
+  if [ "$WARNING_COUNT" -gt 0 ]; then
+    say "  ${YELLOW}${WARN} ${BOLD}Review and fix WARNING items${RESET}"
+    say "  ${DIM}These cause bugs, performance issues, or maintenance problems${RESET}"
+  fi
+  if [ "$INFO_COUNT" -gt 0 ]; then
+    say "  ${BLUE}${INFO} ${BOLD}Consider INFO suggestions${RESET}"
+    say "  ${DIM}Code quality improvements and best practices${RESET}"
+  fi
+
+  if [ "$CRITICAL_COUNT" -eq 0 ] && [ "$WARNING_COUNT" -eq 0 ]; then
+    say "\n  ${GREEN}${BOLD}${SPARKLE} EXCELLENT! No critical or warning issues found ${SPARKLE}${RESET}"
+  fi
+
+  echo ""
+  say "${DIM}Scan completed at: $(now)${RESET}"
+
+  if [[ -n "$OUTPUT_FILE" ]]; then
+    say "${GREEN}${CHECK} Full report saved to: ${CYAN}$OUTPUT_FILE${RESET}"
+  fi
 
 # Baseline compare / creation (text mode only)
 if [[ -n "$BASELINE_FILE" && "$FORMAT" == "text" ]]; then
@@ -3553,11 +3928,8 @@ echo ""
 if [ "$VERBOSE" -eq 0 ]; then
   say "${DIM}Tip: Run with -v/--verbose for more code samples per finding.${RESET}"
 fi
-say "${DIM}Add to pre-commit: ./ubs-golang.sh --ci --fail-on-warning . > go-scan-report.txt${RESET}"
+say "${DIM}Add to pre-commit: ./modules/ubs-golang.sh --ci --fail-on-warning . > go-scan-report.txt${RESET}"
 echo ""
-
-EXIT_CODE=0
-if [ "$CRITICAL_COUNT" -gt 0 ]; then EXIT_CODE=1; fi
-if [ "$FAIL_ON_WARNING" -eq 1 ] && [ $((CRITICAL_COUNT + WARNING_COUNT)) -gt 0 ]; then EXIT_CODE=1; fi
+fi
 
 exit "$EXIT_CODE"
