@@ -23,11 +23,13 @@ def iter_kotlin_files(root: Path):
             yield root
         return
 
-    for path in root.rglob("*.kt"):
-        if any(part in SKIP_DIRS for part in path.parts):
-            continue
-        if path.is_file():
-            yield path
+    # Glob both .kt and .kts files (Kotlin script files)
+    for ext in ("*.kt", "*.kts"):
+        for path in root.rglob(ext):
+            if any(part in SKIP_DIRS for part in path.parts):
+                continue
+            if path.is_file():
+                yield path
 
 
 def find_block_end(text: str, brace_start: int) -> int:

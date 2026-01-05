@@ -42,12 +42,17 @@ def resolve_path(base: Path, value: str) -> Path:
 
 
 def extract_json_from_stdout(stdout: str) -> Optional[Dict[str, Any]]:
+    """Extract first JSON object from stdout, ignoring trailing content."""
+    decoder = json.JSONDecoder()
     lines = stdout.splitlines()
     for idx, line in enumerate(lines):
         if line.strip().startswith("{"):
             candidate = "\n".join(lines[idx:])
             try:
-                return json.loads(candidate)
+                # raw_decode stops at end of JSON, ignoring trailing content
+                obj, _ = decoder.raw_decode(candidate)
+                if isinstance(obj, dict):
+                    return obj
             except json.JSONDecodeError:
                 continue
     return None

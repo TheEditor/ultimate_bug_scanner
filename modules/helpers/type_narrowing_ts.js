@@ -219,7 +219,8 @@ async function analyzeFileFallback(filePath) {
   const results = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const guard = line.match(/if\s*\(\s*!([A-Za-z_$][\w$]*)\b\s*\)/) || line.match(/if\s*\(\s*([A-Za-z_$][\w$]*)\b\s*===\s*(?:null|undefined)\b\s*\)/);
+    // Match both loose (==) and strict (===) equality to be consistent with AST analyzer
+    const guard = line.match(/if\s*\(\s*!([A-Za-z_$][\w$]*)\b\s*\)/) || line.match(/if\s*\(\s*([A-Za-z_$][\w$]*)\b\s*===?\s*(?:null|undefined)\b\s*\)/);
     if (!guard) continue;
     const name = guard[1];
     let exits = false;

@@ -33,10 +33,10 @@ declare -A HELPER_CHECKSUMS=(
   ['helpers/resource_lifecycle_go.go']='10215d2c772dd7905a7e9c60a56899a9d702f1c950e1bfd30d4eb90b190e38bd'
   ['helpers/resource_lifecycle_java.py']='c005da1519eaa751ccf6fa45f99f884aaa30492f91b7c1b527f7f9b782df39f1'
   ['helpers/resource_lifecycle_py.py']='1e884ff42c988fa6a19f9b8f8375bde2334ebcde61735bc4f10b7dc3c900483e'
-  ['helpers/type_narrowing_kotlin.py']='d09302608e75e60d6b871934fb62db9c54c3801daec47c97af57d2a02f7df748'
+  ['helpers/type_narrowing_kotlin.py']='6f0f4482e8c349d15ac2830956baf193eedd2461d1ef836267c78da86c78ad79'
   ['helpers/type_narrowing_rust.py']='355ad60ce6dffb9a7c63169cb83705854612c931e2e8c3a166a81b0cb810647f'
   ['helpers/type_narrowing_swift.py']='f950bafa92391964e4779c77d37dcc11b0ffeab9bc351be439b4709c0f01b41a'
-  ['helpers/type_narrowing_ts.js']='d7bc276be2b0031df4e4ed4da974f19390fb498bf7183bcee0a5b624b3bd4fee'
+  ['helpers/type_narrowing_ts.js']='e129ecf4fb0999dd868780a2a67f422a3cc4ecc17866f21a2a27abfa202bf631'
 )
 
 HELPER_ASSETS=(
