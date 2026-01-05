@@ -34,8 +34,8 @@ jobs:
           echo "Verifying SHA256SUMS integrity..."
           ACTUAL_UBS=$(sha256sum ubs | awk '{print $1}')
           ACTUAL_INSTALL=$(sha256sum install.sh | awk '{print $1}')
-          EXPECTED_UBS=$(grep '  ubs$' SHA256SUMS | awk '{print $1}')
-          EXPECTED_INSTALL=$(grep '  install.sh$' SHA256SUMS | awk '{print $1}')
+          EXPECTED_UBS=$(grep '  ubs$' SHA256SUMS 2>/dev/null | awk '{print $1}' || echo "")
+          EXPECTED_INSTALL=$(grep '  install.sh$' SHA256SUMS 2>/dev/null | awk '{print $1}' || echo "")
 
           FAIL=0
           if [[ "$ACTUAL_UBS" != "$EXPECTED_UBS" ]]; then

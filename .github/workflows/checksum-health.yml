@@ -52,15 +52,17 @@ jobs:
             ERRORS="${ERRORS}install.sh checksum mismatch\n"
           fi
 
+          # Always output the checksum values (needed for issue body even if only modules fail)
+          echo "actual_ubs=$ACTUAL_UBS" >> "$GITHUB_OUTPUT"
+          echo "expected_ubs=$EXPECTED_UBS" >> "$GITHUB_OUTPUT"
+          echo "actual_install=$ACTUAL_INSTALL" >> "$GITHUB_OUTPUT"
+          echo "expected_install=$EXPECTED_INSTALL" >> "$GITHUB_OUTPUT"
+
           if [[ -n "$ERRORS" ]]; then
             echo "healthy=false" >> "$GITHUB_OUTPUT"
             echo "errors<<EOF" >> "$GITHUB_OUTPUT"
             echo -e "$ERRORS" >> "$GITHUB_OUTPUT"
             echo "EOF" >> "$GITHUB_OUTPUT"
-            echo "actual_ubs=$ACTUAL_UBS" >> "$GITHUB_OUTPUT"
-            echo "expected_ubs=$EXPECTED_UBS" >> "$GITHUB_OUTPUT"
-            echo "actual_install=$ACTUAL_INSTALL" >> "$GITHUB_OUTPUT"
-            echo "expected_install=$EXPECTED_INSTALL" >> "$GITHUB_OUTPUT"
           else
             echo "healthy=true" >> "$GITHUB_OUTPUT"
             echo "::notice::All checksums are healthy"
