@@ -46,9 +46,9 @@ done
 ACTUAL_UBS=$(compute_sha256 ubs)
 ACTUAL_INSTALL=$(compute_sha256 install.sh)
 
-# Extract expected checksums from SHA256SUMS
-EXPECTED_UBS=$(grep '  ubs$' SHA256SUMS | awk '{print $1}' || echo "")
-EXPECTED_INSTALL=$(grep '  install.sh$' SHA256SUMS | awk '{print $1}' || echo "")
+# Extract expected checksums from SHA256SUMS (2>/dev/null suppresses error if malformed)
+EXPECTED_UBS=$(grep '  ubs$' SHA256SUMS 2>/dev/null | awk '{print $1}' || echo "")
+EXPECTED_INSTALL=$(grep '  install.sh$' SHA256SUMS 2>/dev/null | awk '{print $1}' || echo "")
 
 MISMATCH=0
 

@@ -5,10 +5,12 @@ on:
     branches: ["master"]
     paths:
       - "ubs"
+      - "install.sh"
       - "SHA256SUMS"
   pull_request:
     paths:
       - "ubs"
+      - "install.sh"
       - "SHA256SUMS"
   workflow_dispatch:
 
