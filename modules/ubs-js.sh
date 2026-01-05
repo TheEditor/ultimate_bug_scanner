@@ -2709,8 +2709,8 @@ if [[ "$HAS_AST_GREP" -eq 1 ]] && command -v python3 >/dev/null 2>&1; then
 	      ast_grep_project --pattern '$Y !== typeof $X' --json=stream 2>/dev/null || true
 	      ast_grep_project --pattern '$Y != typeof $X'  --json=stream 2>/dev/null || true
 	    ) | python3 -c "$(cat <<'PY'
-	import json
-	import sys
+import json
+import sys
 
 limit = int(sys.argv[1]) if len(sys.argv) > 1 else 3
 valid = {"undefined", "string", "number", "boolean", "function", "object", "symbol", "bigint"}

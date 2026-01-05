@@ -1952,14 +1952,18 @@ message: "Empty if err != nil block; likely unfinished or swallowed error."
 YAML
 
   # Dropped error: if err != nil { return nil }
+  # NOTE: Uses 'not: regex' to exclude multi-value returns like 'return nil, err'
   cat >"$AST_RULE_DIR/go.iferr-return-nil.yml" <<'YAML'
 id: go.iferr-return-nil
 language: go
 rule:
-  pattern: |
-    if err != nil {
-      return nil
-    }
+  all:
+    - pattern: |
+        if err != nil {
+          return nil
+        }
+    - not:
+        regex: ','
 severity: error
 message: "Error checked but dropped (return nil). Likely should return err or wrap it."
 YAML
