@@ -12,7 +12,7 @@ set -Eeuo pipefail
 shopt -s lastpipe || true
 trap '' SIGPIPE 2>/dev/null || true
 
-UBS_VERSION="5.0.6"
+UBS_VERSION="5.0.7"
 REPO_RAW="https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master"
 MODULE_PATH_TEMPLATE="$REPO_RAW/modules/ubs-%s.sh"
 
@@ -145,6 +145,9 @@ ONLY_LANGS=""              # csv: js,python,cpp,rust
 EXCLUDE_LANGS=""           # csv
 IGNORE_FILE=""
 DEFAULT_IGNORES="node_modules,venv,.venv,env,.env,site-packages,dist,build,vendor,target,bin,obj,.idea,.vscode,.git,.hg,.svn,__pycache__,.mypy_cache,.pytest_cache,.ruff_cache,coverage,.gradle,DerivedData,bundler,gems,wheels"
+# Safety guards: maximum directory size (MB) and whether to refuse home/root dirs
+MAX_DIR_SIZE_MB="${UBS_MAX_DIR_SIZE_MB:-1000}"  # 1GB default; set 0 to disable
+REFUSE_HOME_ROOT="${UBS_REFUSE_HOME_ROOT:-1}"  # 1 = refuse, 0 = allow
 GLOBAL_EXCLUDE_PATTERNS="$DEFAULT_IGNORES"
 FILTERED_PROJECT_DIR=""
 MODULE_DIR_DEFAULT="${XDG_DATA_HOME:-$HOME/.local/share}/ubs/modules"
@@ -223,6 +226,12 @@ Options:
   --diff, --git-diff      Scan only modified files (working tree vs HEAD)
   -h, --help              Show this help
 
+Environment Variables:
+  UBS_MAX_DIR_SIZE_MB=N       Max directory size in MB before refusing to scan (default: 1000)
+                              Set to 0 to disable this safety check
+  UBS_REFUSE_HOME_ROOT=0|1    Whether to refuse scanning \$HOME or / (default: 1)
+                              Set to 0 to allow scanning these directories
+
 Examples:
   ubs .                       # auto-detect languages and scan
   ubs --staged                # scan only staged files (pre-commit style)
@@ -231,6 +240,7 @@ Examples:
   ubs --only=js,python .      # restrict language set
   ubs doctor --fix            # validate cached modules & redownload corrupted copies
   ubs sessions --entries 1    # view the most recent installer summary
+  UBS_MAX_DIR_SIZE_MB=0 ubs . # disable size check for large directories
 USAGE
 }
 
@@ -430,6 +440,52 @@ else
   fi
 fi
 SOURCE_PROJECT_DIR="$PROJECT_DIR"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Safety guards: prevent disk exhaustion when scanning large or sensitive dirs
+# Fixes GitHub issue #12: UBS copies entire scan directory to /tmp
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Check 1: Refuse to scan home directory or root (unless explicitly allowed)
+if [[ "$REFUSE_HOME_ROOT" -eq 1 && -d "$SOURCE_PROJECT_DIR" ]]; then
+  resolved_dir="$(cd "$SOURCE_PROJECT_DIR" 2>/dev/null && pwd -P)"
+  if [[ "$resolved_dir" == "$HOME" ]]; then
+    say "${RED}${X}${RESET} ${BOLD}Refusing to scan home directory${RESET}"
+    say "${DIM}UBS copies the scan target to /tmp, which can exhaust disk space on large directories.${RESET}"
+    say "${DIM}If you really want to scan \$HOME, set${RESET} UBS_REFUSE_HOME_ROOT=0"
+    exit 2
+  fi
+  if [[ "$resolved_dir" == "/" ]]; then
+    say "${RED}${X}${RESET} ${BOLD}Refusing to scan root directory${RESET}"
+    say "${DIM}UBS copies the scan target to /tmp, which can exhaust disk space.${RESET}"
+    say "${DIM}If you really want to scan /, set${RESET} UBS_REFUSE_HOME_ROOT=0"
+    exit 2
+  fi
+fi
+
+# Check 2: Refuse directories larger than MAX_DIR_SIZE_MB (unless set to 0)
+if [[ "$MAX_DIR_SIZE_MB" -gt 0 && -d "$SOURCE_PROJECT_DIR" ]]; then
+  dir_size_mb=0
+  if need_cmd du; then
+    # Use du -sm for POSIX-ish systems; fall back to du -sk on others
+    if dir_size_mb=$(du -sm "$SOURCE_PROJECT_DIR" 2>/dev/null | cut -f1); then
+      :  # got MB directly
+    elif dir_size_kb=$(du -sk "$SOURCE_PROJECT_DIR" 2>/dev/null | cut -f1); then
+      dir_size_mb=$((dir_size_kb / 1024))
+    fi
+  fi
+  if [[ "$dir_size_mb" -gt "$MAX_DIR_SIZE_MB" ]]; then
+    say "${RED}${X}${RESET} ${BOLD}Directory too large${RESET}: ${dir_size_mb}MB exceeds limit of ${MAX_DIR_SIZE_MB}MB"
+    say "${DIM}UBS copies the scan target to /tmp before analysis, which can exhaust disk space.${RESET}"
+    say "${DIM}This safety check prevents accidental scans of large directories like \$HOME.${RESET}"
+    say ""
+    say "${DIM}Options:${RESET}"
+    say "${DIM}  • Scan a smaller subdirectory instead${RESET}"
+    say "${DIM}  • Increase the limit:${RESET} UBS_MAX_DIR_SIZE_MB=5000 ubs ..."
+    say "${DIM}  • Disable the check:${RESET} UBS_MAX_DIR_SIZE_MB=0 ubs ..."
+    exit 2
+  fi
+fi
 
 if [[ "$SHOW_VERSION" -eq 1 ]]; then
   short_sha=""
