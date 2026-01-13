@@ -468,10 +468,17 @@ if [[ "$MAX_DIR_SIZE_MB" -gt 0 && -d "$SOURCE_PROJECT_DIR" ]]; then
   dir_size_mb=0
   if need_cmd du; then
     # Use du -sm for POSIX-ish systems; fall back to du -sk on others
-    if dir_size_mb=$(du -sm "$SOURCE_PROJECT_DIR" 2>/dev/null | cut -f1); then
-      :  # got MB directly
-    elif dir_size_kb=$(du -sk "$SOURCE_PROJECT_DIR" 2>/dev/null | cut -f1); then
-      dir_size_mb=$((dir_size_kb / 1024))
+    # Carefully validate output is numeric before using it
+    local result=""
+    result=$(du -sm "$SOURCE_PROJECT_DIR" 2>/dev/null | cut -f1)
+    if [[ "$result" =~ ^[0-9]+$ ]]; then
+      dir_size_mb="$result"
+    else
+      # Fallback for systems where -m flag doesn't work
+      result=$(du -sk "$SOURCE_PROJECT_DIR" 2>/dev/null | cut -f1)
+      if [[ "$result" =~ ^[0-9]+$ ]]; then
+        dir_size_mb=$((result / 1024))
+      fi
     fi
   fi
   if [[ "$dir_size_mb" -gt "$MAX_DIR_SIZE_MB" ]]; then
