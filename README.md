@@ -164,7 +164,31 @@ ubs --profile=loose    # Skip TODO/debug/code-quality nits when prototyping
 ubs . --format=json    # Pure JSON on stdout; logs go to stderr
 ubs . --format=jsonl   # Line-delimited summary per scanner + totals
 ubs . --format=jsonl --beads-jsonl out/findings.jsonl  # Save JSONL for Beads/"strung"
+
+# Per-incident JSONL (one record per displayed code sample)
+ubs . --incidents-jsonl out/incidents.jsonl
+ubs . --incidents-jsonl out/incidents.jsonl --incidents-min-severity=warning
 ```
+
+### Beads-ready incidents JSONL (per-sample parity)
+
+UBS now emits a **per-incident JSONL** stream designed for reliable Beads issue creation. This is the new "robot-ready" output that mirrors what humans see in the console:
+
+- **Sample-level parity:** incidents are emitted only when a code sample is printed (i.e., `print_code_sample()`), so JSONL aligns with the text output's `DETAIL_LIMIT` and `MAX_DETAILED` sampling.
+- **Stable schema:** each line is a JSON object with required fields  
+  `severity`, `rule_id`, `title`, `description`, `language`, `file`, `start_line`, `source`  
+  and optional fields  
+  `end_line`, `start_column`, `end_column`, `code`.
+- **Source labeling:** `source` identifies the emitter (e.g., `ubs-python` or `ast-grep`).
+- **Inline suppression respected:** lines containing `ubs:ignore`, `ubs: disable`, `noqa`, or `nolint` prevent incident emission.
+- **Git-aware scans:** works with `--staged` / `--diff` and restores original paths even when scanning a shadow workspace.
+
+Example JSONL line:
+```json
+{"severity":"critical","rule_id":"py.eval-exec","title":"Avoid eval/exec; leads to code injection","description":"Avoid eval/exec; leads to code injection","language":"python","file":"src/app.py","start_line":42,"source":"ast-grep","end_line":42,"start_column":5,"end_column":16}
+```
+
+If you're piping UBS output into Beads, prefer `--incidents-jsonl` for deterministic issue creation. The existing `--beads-jsonl` remains a summary-level artifact.
 
 ### Keeping noise low
 - UBS auto-ignores common junk (`node_modules`, virtualenvs, dist/build/target/vendor, editor caches, etc.).
