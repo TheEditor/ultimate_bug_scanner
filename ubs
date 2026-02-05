@@ -18,14 +18,14 @@ MODULE_PATH_TEMPLATE="$REPO_RAW/modules/ubs-%s.sh"
 
 # Known-good module digests (sha256) for supply-chain verification.
 declare -A MODULE_CHECKSUMS=(
-  [cpp]='ac6a213e3cb8fc2eb24d18754c1e83c994c89149e5f690116d848c57548e6f28'
-  [golang]='b157d6e8f2684246c8add2a6cd0b3da698a8f3aace6e7c367ed76336e21ff4c6'
-  [java]='6b120bd6bd199d45e5f80d295888aeab10c1439abe064797047e776258b37256'
-  [js]='f92889318e794d96277f55d6dee9da3947c122786ee929d7eaf380d4332a38c0'
-  [python]='e7697af93a7a2b0e413ecb17bf878656ee92229a7fbe47c1fa77f779dd6c9a43'
-  [ruby]='3490a56a174f4873d01a83d4ceac8bdb7b6d56024c9aff25257af28c9d805405'
-  [rust]='5c0df5f4638cc18aca08b9bad263d677ccaa3b180670a4d47ebba1a071e782f0'
-  [swift]='b350c2ae42725f96a2c94eaf7c70ff4864ecae53e0fc7d9a3fee5988128c8a2a'
+  [cpp]='7b60fc2024729cd3350e883f588ea291fe0155b0f8cb2eb38bbbaa767238b01b'
+  [golang]='46bd9632a34ed3815159397c7640b3335fce00d9b0c512657aa4e599549f4551'
+  [java]='24ba2fb5713904801c23dc83d7397fa6bc320d99bfb1bece903613ae12b96d6d'
+  [js]='152730495e9e3198e12115b6f5e0006d548da637d40cd5615fe763fcebe8981c'
+  [python]='c54a64104f5f2319b17ba3582a9be4a6d5f7a34e3be2d64e3e952834b95b2097'
+  [ruby]='8189586f32a2704062daba59a9831f002911251150d713eb749c0c1aef009b3b'
+  [rust]='c56ff5657671a2356f7e192f07d34e9971788c9cf9debf934f513e203cb95ac0'
+  [swift]='cec94ca5be1fc6f83f54b87502ec48e509c7125fef43d8e47b51deeffc6f3c34'
 )
 
 # Helper assets used by some modules (AST correlation and type narrowing).
@@ -183,6 +183,9 @@ GIT_BLOB_BASE=""
 SARIF_AUTOMATION_ID=""
 SHOW_VERSION=0
 BEADS_JSONL_PATH=""
+INCIDENTS_JSONL_PATH=""
+INCIDENTS_MIN_SEVERITY="info"
+INCIDENTS_MIN_SEVERITY_SET=0
 SUGGEST_IGNORE=0
 JSONL_DETAIL=1               # 1=include findings, 0=summary only (for backward compat)
 
@@ -219,6 +222,8 @@ Options:
   --report-json=FILE      Write combined summary JSON to FILE
   --html-report=FILE      Emit shareable HTML report to FILE
   --beads-jsonl=FILE      Also write combined findings to JSONL for Beads/strung
+  --incidents-jsonl=FILE  Write per-incident JSONL (sampled findings) to FILE
+  --incidents-min-severity=LEVEL  Filter incidents: critical|warning|info (default: info)
   --jsonl-summary-only    JSONL output: emit only summary counts, no individual findings
   --suggest-ignore        Print large-directory ignore suggestions (without modifying files)
   --update                Update the installed ubs binary and exit
@@ -397,6 +402,17 @@ else
       --beads-jsonl)
         if [[ $# -lt 2 ]]; then usage; exit 2; fi
         shift; BEADS_JSONL_PATH="$1"; shift;;
+      --incidents-jsonl=*) INCIDENTS_JSONL_PATH="${1#*=}"; shift;;
+      --incidents-jsonl)
+        if [[ $# -lt 2 ]]; then usage; exit 2; fi
+        shift; INCIDENTS_JSONL_PATH="$1"; shift;;
+      --incidents-min-severity=*)
+        INCIDENTS_MIN_SEVERITY="${1#*=}"
+        INCIDENTS_MIN_SEVERITY_SET=1
+        shift;;
+      --incidents-min-severity)
+        if [[ $# -lt 2 ]]; then usage; exit 2; fi
+        shift; INCIDENTS_MIN_SEVERITY="$1"; INCIDENTS_MIN_SEVERITY_SET=1; shift;;
       --suggest-ignore) SUGGEST_IGNORE=1; shift;;
       --jsonl-summary-only) JSONL_DETAIL=0; shift;;
       --ignore-file=*) IGNORE_FILE="${1#*=}"; shift;;
@@ -446,6 +462,20 @@ else
   fi
 fi
 SOURCE_PROJECT_DIR="$PROJECT_DIR"
+
+if [[ "$INCIDENTS_MIN_SEVERITY_SET" -eq 1 && -z "$INCIDENTS_JSONL_PATH" ]]; then
+  say_err "${RED}${X}${RESET} --incidents-min-severity requires --incidents-jsonl=FILE"
+  exit 2
+fi
+if [[ -n "$INCIDENTS_JSONL_PATH" ]]; then
+  case "$INCIDENTS_MIN_SEVERITY" in
+    critical|warning|info) ;;
+    *)
+      say_err "${RED}${X}${RESET} --incidents-min-severity must be critical, warning, or info"
+      exit 2
+      ;;
+  esac
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Safety guards: prevent disk exhaustion when scanning large or sensitive dirs
@@ -1903,6 +1933,10 @@ run_lang(){
   [[ "$JOBS" -gt 0 ]] && args+=("--jobs=$JOBS")
   [[ -n "$GLOBAL_EXCLUDE_PATTERNS" ]] && args+=("--exclude=$GLOBAL_EXCLUDE_PATTERNS")
   [[ -n "${UBS_SKIP_CATEGORIES:-}" ]] && args+=("--skip=$UBS_SKIP_CATEGORIES")
+  if [[ -n "$INCIDENTS_JSONL_PATH" ]]; then
+    local incidents_tmp="$TMPDIR_RUN/$lang.incidents.jsonl"
+    args+=("--incidents-tmp=$incidents_tmp" "--incidents-min-severity=$INCIDENTS_MIN_SEVERITY")
+  fi
   args+=("$PROJECT_DIR")
 
   case "$fmt" in
@@ -2235,6 +2269,30 @@ write_jsonl_summary(){
   fi
 }
 
+write_incidents_jsonl(){
+  local dest="$1"
+  [[ -z "$dest" ]] && return 0
+  mkdir -p "$(dirname "$dest")" 2>/dev/null || true
+  local tmp="$TMPDIR_RUN/combined.incidents.jsonl"
+  : >"$tmp"
+  local found=0
+  for f in "$TMPDIR_RUN"/*.incidents.jsonl; do
+    [[ -f "$f" ]] || continue
+    cat "$f" >>"$tmp"
+    found=1
+  done
+  if [[ "$found" -eq 0 ]]; then
+    say "${YELLOW}${WARN}${RESET} No incidents collected"
+    : >"$dest" 2>/dev/null || return 1
+    return 0
+  fi
+  restore_original_paths "$tmp"
+  if ! cp "$tmp" "$dest"; then
+    return 1
+  fi
+  say "${DIM}${INFO}${RESET} Incidents JSONL written to $dest"
+}
+
 suggest_ignore_candidates(){
   local threshold=200
   IFS=',' read -r -a defaults <<<"$DEFAULT_IGNORES"
@@ -2507,6 +2565,13 @@ case "$FORMAT" in
 	    if [[ "$FAIL_ON_WARNING" -eq 1 && $((crit + warn)) -gt 0 ]]; then desired=1; fi
 	    if [[ "$FAIL_ON_WARNING" -eq 0 && "$crit" -gt 0 ]]; then desired=1; fi
 	    if [[ "$desired" -gt "$status" ]]; then status="$desired"; fi
+	  fi
+	fi
+
+	if [[ -n "$INCIDENTS_JSONL_PATH" ]]; then
+	  [[ "$HAS_ENV_ERROR" -eq 1 ]] && say_err "${YELLOW}${WARN}${RESET} Some modules failed; incidents output may be incomplete."
+	  if ! write_incidents_jsonl "$INCIDENTS_JSONL_PATH"; then
+	    say "${YELLOW}${WARN}${RESET} Could not write incidents JSONL to $INCIDENTS_JSONL_PATH"
 	  fi
 	fi
 

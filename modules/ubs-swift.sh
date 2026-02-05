@@ -190,6 +190,11 @@ RESPECT_IGNORE=0
 NO_IGNORE_ALL=0
 DUMP_RULES_DIR=""
 EXPLAIN_RULE_ID=""
+INCIDENTS_TMP=""
+INCIDENTS_MIN_SEVERITY="info"
+LANG_CODE="swift"
+_INC_SEV="" _INC_RULE="" _INC_TITLE="" _INC_DESC="" _INC_SOURCE=""
+CURRENT_FINDING_SEV="" CURRENT_FINDING_RULE="" CURRENT_FINDING_TITLE="" CURRENT_FINDING_DESC="" CURRENT_FINDING_SOURCE=""
 
 die(){ echo -e "${RED}${BOLD}fatal:${RESET} ${WHITE}$*${RESET}" >&2; exit 2; }
 
@@ -320,6 +325,8 @@ Options:
  --emit-csv=FILE Write a CSV of per-category counts
  --emit-html=FILE Write an HTML summary
  --max-detailed=N Cap total code samples printed (default: $MAX_DETAILED)
+ --incidents-tmp=FILE Append per-sample incidents JSONL to FILE
+ --incidents-min-severity=LEVEL Filter incidents: critical|warning|info (default: info)
  --sdk=KIND ios|macos|tvos|watchos (default: $SDK_KIND)
  --progress Show minimal progress dots
  --respect-ignore Respect ignore files for ripgrep (smaller scan scope)
@@ -365,6 +372,14 @@ while [[ $# -gt 0 ]]; do
     --emit-csv=*) EMIT_CSV="${1#*=}"; shift;;
     --emit-html=*) EMIT_HTML="${1#*=}"; shift;;
     --max-detailed=*) MAX_DETAILED="${1#*=}"; shift;;
+    --incidents-tmp=*) INCIDENTS_TMP="${1#*=}"; shift;;
+    --incidents-tmp)
+      if [[ $# -lt 2 ]]; then print_usage; exit 2; fi
+      shift; INCIDENTS_TMP="$1"; shift;;
+    --incidents-min-severity=*) INCIDENTS_MIN_SEVERITY="${1#*=}"; shift;;
+    --incidents-min-severity)
+      if [[ $# -lt 2 ]]; then print_usage; exit 2; fi
+      shift; INCIDENTS_MIN_SEVERITY="$1"; shift;;
     --sdk=*) SDK_KIND="${1#*=}"; shift;;
     --progress) PROGRESS=1; shift;;
   --respect-ignore) RESPECT_IGNORE=1; shift;;
@@ -553,6 +568,73 @@ maybe_clear(){ if [[ "$FORMAT" == "text" && -t 1 && "$CI_MODE" -eq 0 ]]; then cl
 say(){ [[ "$QUIET" -eq 1 ]] && return 0; echo -e "$*"; }
 tick(){ [[ "$PROGRESS" -eq 1 && "$QUIET" -eq 0 ]] && printf "%s" "."; }
 
+slugify_rule_id() {
+  local raw="$1"
+  raw="${raw%%\[*}"
+  raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g')"
+  [[ -n "$raw" ]] || raw="unknown"
+  printf 'swift.%s' "$raw"
+}
+
+is_suppressed() {
+  local file="$1" line="$2"
+  [[ -z "$file" || -z "$line" ]] && return 1
+  python3 - "$file" "$line" <<'PY' 2>/dev/null
+import sys
+MARKERS = ["ubs:ignore", "ubs: disable", "nolint", "noqa"]
+file, line = sys.argv[1], int(sys.argv[2])
+try:
+    lines = open(file, encoding='utf-8', errors='replace').readlines()
+    idx = line - 1
+    for marker in MARKERS:
+        if 0 <= idx < len(lines) and marker in lines[idx].lower():
+            sys.exit(0)
+        if 0 <= idx - 1 < len(lines) and marker in lines[idx - 1].lower():
+            sys.exit(0)
+    sys.exit(1)
+except Exception:
+    sys.exit(1)
+PY
+}
+
+emit_incident() {
+  [[ -z "$INCIDENTS_TMP" || -z "$_INC_SEV" ]] && return 0
+  local file="$1" sl="$2" el="${3:-}" sc="${4:-}" ec="${5:-}" code="${6:-}"
+  local min_sev="${INCIDENTS_MIN_SEVERITY,,}"
+  case "$min_sev" in
+    critical) [[ "$_INC_SEV" != "critical" ]] && return 0 ;;
+    warning)  [[ "$_INC_SEV" == "info" ]] && return 0 ;;
+  esac
+  local title="${_INC_TITLE:-Finding}"
+  local desc="${_INC_DESC:-$title}"
+  local rule="$_INC_RULE"
+  [[ -z "$rule" ]] && rule="$(slugify_rule_id "$title")"
+  local source="${_INC_SOURCE:-$LANG_CODE}"
+  printf '%s' "$code" | python3 - "$INCIDENTS_TMP" "$_INC_SEV" "$rule" \
+    "$title" "$desc" "$LANG_CODE" "$file" "$sl" "$el" "$sc" "$ec" "$source" <<'PY' 2>/dev/null || true
+import json, sys
+code = sys.stdin.read()
+tmp, sev, rule, title, desc, lang, file, sl, el, sc, ec, src = sys.argv[1:13]
+obj = {"severity": sev, "rule_id": rule, "title": title, "description": desc,
+       "language": lang, "file": file, "start_line": int(sl), "source": src}
+if el: obj["end_line"] = int(el)
+if sc: obj["start_column"] = int(sc)
+if ec: obj["end_column"] = int(ec)
+if code.strip(): obj["code"] = code
+open(tmp, "a").write(json.dumps(obj) + "\n")
+PY
+}
+
+with_incident_context() {
+  local sev="$1" rule="$2" title="$3" desc="$4" source="$5"
+  shift 5
+  _INC_SEV="$sev" _INC_RULE="$rule" _INC_TITLE="$title" _INC_DESC="$desc" _INC_SOURCE="$source"
+  local rc
+  if "$@"; then rc=0; else rc=$?; fi
+  _INC_SEV="" _INC_RULE="" _INC_TITLE="" _INC_DESC="" _INC_SOURCE=""
+  return $rc
+}
+
 print_header(){
   say "\n${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
   say "${WHITE}${BOLD}$1${RESET}"
@@ -563,6 +645,11 @@ print_subheader(){ say "\n${YELLOW}${BOLD}$BULLET $1${RESET}"; }
 
 print_finding(){
  local severity; severity="$(normalize_severity "$1")"
+ CURRENT_FINDING_SEV=""
+ CURRENT_FINDING_RULE=""
+ CURRENT_FINDING_TITLE=""
+ CURRENT_FINDING_DESC=""
+ CURRENT_FINDING_SOURCE=""
  case "$severity" in
     good)
       local title=$2
@@ -572,6 +659,11 @@ print_finding(){
       local raw_count=${2:-0}; local title=$3; local description="${4:-}"
       local count; count=$(printf '%s\n' "$raw_count" | awk 'END{print $0+0}')
       _bump_counts "$severity" "$count"
+  CURRENT_FINDING_SEV="$severity"
+  CURRENT_FINDING_TITLE="$title"
+  CURRENT_FINDING_DESC="$description"
+  CURRENT_FINDING_SOURCE="ubs-swift"
+  CURRENT_FINDING_RULE="$(slugify_rule_id "$title")"
    case "$severity" in
         critical)
      say " ${RED}${BOLD}${FIRE} CRITICAL${RESET} ${WHITE}($count found)${RESET}"
@@ -595,10 +687,25 @@ print_finding(){
 
 print_code_sample(){
  [[ "$DETAILED_EMITTED" -ge "$MAX_DETAILED" ]] && return 0
- local file=$1; local line=$2; local code=$3
+ local file=$1; local line=$2; local code=$3; local end_line="${4:-}"; local start_col="${5:-}"; local end_col="${6:-}"
+ if [[ -n "$INCIDENTS_TMP" ]]; then
+  is_suppressed "$file" "$line" && return 0
+  emit_incident "$file" "$line" "$end_line" "$start_col" "$end_col" "$code"
+ fi
  DETAILED_EMITTED=$((DETAILED_EMITTED + 1))
  say "${GRAY} $file:$line${RESET}"
  say "${WHITE} $code${RESET}"
+}
+
+print_code_sample_current(){
+ local file=$1; local line=$2; local code=$3; local end_line="${4:-}"; local start_col="${5:-}"; local end_col="${6:-}"
+ local inc_title="${CURRENT_FINDING_TITLE:-Finding}"
+ local inc_desc="${CURRENT_FINDING_DESC:-$inc_title}"
+ local inc_rule="${CURRENT_FINDING_RULE:-$(slugify_rule_id "$inc_title")}"
+ local inc_sev="${CURRENT_FINDING_SEV:-info}"
+ local inc_source="${CURRENT_FINDING_SOURCE:-$LANG_CODE}"
+ with_incident_context "$inc_sev" "$inc_rule" "$inc_title" "$inc_desc" "$inc_source" \
+  print_code_sample "$file" "$line" "$code" "$end_line" "$start_col" "$end_col"
 }
 
 # Parse grep/rg output line handling Windows drive letters (C:/path...)
@@ -622,9 +729,9 @@ show_detailed_finding(){
  local printed=0
  [[ "$DETAILED_EMITTED" -ge "$MAX_DETAILED" ]] && return 0
  while IFS= read -r rawline; do
-  [[ -z "$rawline" ]] && continue
-  parse_grep_line "$rawline" || continue
-  print_code_sample "$PARSED_FILE" "$PARSED_LINE" "$PARSED_CODE"
+ [[ -z "$rawline" ]] && continue
+ parse_grep_line "$rawline" || continue
+  print_code_sample_current "$PARSED_FILE" "$PARSED_LINE" "$PARSED_CODE"
   printed=$((printed + 1))
   [[ $printed -ge $limit || "$DETAILED_EMITTED" -ge "$MAX_DETAILED" ]] && break
  done < <("${GREP_RN[@]}" -e "$pattern" "$PROJECT_DIR" 2>/dev/null | head -n "$limit" || true) || true
@@ -823,32 +930,39 @@ def sev_map(s: str) -> str:
         return "info"
     return "info"
 
-def start_line(obj: dict) -> int:
+def range_info(obj: dict):
     rng = obj.get("range") or {}
     start = rng.get("start") or {}
+    end = rng.get("end") or {}
     ln0 = start.get("row")
     if ln0 is None:
         ln0 = start.get("line", 0)
     try:
-        return int(ln0) + 1
+        sl = int(ln0) + 1
     except Exception:
-        return 1
+        sl = 1
+    el0 = end.get("row") if end.get("row") is not None else end.get("line")
+    el = (int(el0) + 1) if el0 is not None else None
+    sc = start.get("column")
+    ec = end.get("column")
+    sc = (int(sc) + 1) if sc is not None else None
+    ec = (int(ec) + 1) if ec is not None else None
+    return sl, el, sc, ec
 
 def add(obj: dict) -> None:
     rid = obj.get("rule_id") or obj.get("id") or "unknown"
     sev = sev_map(obj.get("severity") or obj.get("level") or "info")
     file = obj.get("file", "?")
-    line = start_line(obj)
+    line, end_line, start_col, end_col = range_info(obj)
     msg = obj.get("message") or rid
     if check_suppression(file, line): return
     b = buckets.setdefault(rid, {"severity": sev, "message": msg, "count": 0, "samples": []})
     b["count"] += 1
     if len(b["samples"]) < limit:
-        ln = start_line(obj)
-        if check_suppression(file, ln): return
+        if check_suppression(file, line): return
         lines = (obj.get("lines") or "").strip().splitlines()
         code = (lines[0] if lines else "").strip()
-        b["samples"].append((file, ln, code))
+        b["samples"].append((file, line, code, end_line, start_col, end_col))
 
 with open(path, "r", encoding="utf-8", errors="replace") as fh:
     for raw in fh:
@@ -866,22 +980,32 @@ for rid, data in sorted(
     key=lambda kv: (sev_rank.get(kv[1]["severity"], 9), -kv[1]["count"], kv[0]),
 ):
     print(f"__FINDING__\t{data['severity']}\t{data['count']}\t{rid}\t{data['message']}")
-    for f, l, c in data["samples"]:
+    for f, l, c, el, sc, ec in data["samples"]:
         s = (c or "").replace("\t", " ").strip()
-        print(f"__SAMPLE__\t{f}\t{l}\t{s}")
+        def fmt(v):
+            return "-" if v is None else str(v)
+        print(f"__SAMPLE__\t{f}\t{l}\t{s}\t{fmt(el)}\t{fmt(sc)}\t{fmt(ec)}")
 PYTHON_END
-    while IFS=$'\t' read -r tag a b c d; do
+    local sample_sev="" sample_rule="" sample_title="" sample_desc=""
+    while IFS=$'\t' read -r tag a b c d e f; do
     case "$tag" in
     __FINDING__)
      local sev cnt rid msg cat
      sev="$(normalize_severity "$a")"
      cnt="$(num_clamp "$b")"
      rid="$c"; msg="$d"
+     sample_sev="$sev"; sample_rule="$rid"; sample_title="$msg"; sample_desc="$msg"
      cat="${AG_RULE_CATEGORY[$rid]:-0}"
      set_category "$cat"
      print_finding "$sev" "$cnt" "$rid: $msg"
      ;;
-    __SAMPLE__) print_code_sample "$a" "$b" "$c" ;;
+    __SAMPLE__)
+     [[ "$d" == "-" ]] && d=""
+     [[ "$e" == "-" ]] && e=""
+     [[ "$f" == "-" ]] && f=""
+     with_incident_context "$sample_sev" "$sample_rule" "$sample_title" "$sample_desc" "ast-grep" \
+      print_code_sample "$a" "$b" "$c" "$d" "$e" "$f"
+     ;;
    esac
   done <"$tmp"
  else
@@ -1334,6 +1458,7 @@ PY
  fi
 
  local any=0
+ local sample_sev="" sample_rule="" sample_title="" sample_desc=""
  while IFS=$'\t' read -r tag a b c d e; do
   case "$tag" in
    __FINDING__)
@@ -1342,11 +1467,13 @@ PY
     sev="$(normalize_severity "$a")"
     cnt="$(num_clamp "$b")"
     rid="$c"; title="$d"; desc="$e"
+    sample_sev="$sev"; sample_rule="$rid"; sample_title="$title"; sample_desc="$desc"
     set_category 4
     print_finding "$sev" "$cnt" "$rid: $title" "$desc"
     ;;
    __SAMPLE__)
-    print_code_sample "$a" "$b" "$c"
+    with_incident_context "$sample_sev" "$sample_rule" "$sample_title" "$sample_desc" "correlation" \
+     print_code_sample "$a" "$b" "$c"
     ;;
   esac
  done <"$tmp"

@@ -120,6 +120,11 @@ DISABLE_PIPEFAIL_DURING_SCAN=1
 SARIF_OUT=""
 JSON_OUT=""
 MIN_SEVERITY="info"     # info|warning|critical
+INCIDENTS_TMP=""
+INCIDENTS_MIN_SEVERITY="info"
+LANG_CODE="java"
+_INC_SEV="" _INC_RULE="" _INC_TITLE="" _INC_DESC="" _INC_SOURCE=""
+CURRENT_FINDING_SEV="" CURRENT_FINDING_RULE="" CURRENT_FINDING_TITLE="" CURRENT_FINDING_DESC="" CURRENT_FINDING_SOURCE=""
 
 RUN_BUILD=1
 JAVA_REQUIRED_MAJOR=21
@@ -164,6 +169,8 @@ Options:
   --sarif-out=FILE           Save ast-grep SARIF to FILE (independent of --format)
   --json-out=FILE            Save ast-grep JSON stream to FILE (independent of --format)
   --min-severity=LEVEL       Filter text output: info|warning|critical (default: info)
+  --incidents-tmp=FILE       Append per-sample incidents JSONL to FILE
+  --incidents-min-severity=LEVEL  Filter incidents: critical|warning|info (default: info)
   -h, --help                 Show help
 
 Env:
@@ -195,6 +202,14 @@ while [[ $# -gt 0 ]]; do
     --sarif-out=*) SARIF_OUT="${1#*=}"; shift;;
     --json-out=*)  JSON_OUT="${1#*=}"; shift;;
     --min-severity=*) MIN_SEVERITY="${1#*=}"; shift;;
+    --incidents-tmp=*) INCIDENTS_TMP="${1#*=}"; shift;;
+    --incidents-tmp)
+      if [[ $# -lt 2 ]]; then print_usage; exit 2; fi
+      shift; INCIDENTS_TMP="$1"; shift;;
+    --incidents-min-severity=*) INCIDENTS_MIN_SEVERITY="${1#*=}"; shift;;
+    --incidents-min-severity)
+      if [[ $# -lt 2 ]]; then print_usage; exit 2; fi
+      shift; INCIDENTS_MIN_SEVERITY="$1"; shift;;
     -h|--help)    print_usage; exit 0;;
     *)
       if [[ "$PROJECT_DIR" == "." && ! "$1" =~ ^- ]]; then
@@ -354,6 +369,73 @@ severity_allows() {
 maybe_clear() { if [[ -t 1 && "$CI_MODE" -eq 0 && "$QUIET" -eq 0 ]]; then clear || true; fi; }
 say() { [[ "$QUIET" -eq 1 ]] && return 0; echo -e "$*"; }
 
+slugify_rule_id() {
+  local raw="$1"
+  raw="${raw%%\[*}"
+  raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g')"
+  [[ -n "$raw" ]] || raw="unknown"
+  printf 'java.%s' "$raw"
+}
+
+is_suppressed() {
+  local file="$1" line="$2"
+  [[ -z "$file" || -z "$line" ]] && return 1
+  python3 - "$file" "$line" <<'PY' 2>/dev/null
+import sys
+MARKERS = ["ubs:ignore", "ubs: disable", "nolint", "noqa"]
+file, line = sys.argv[1], int(sys.argv[2])
+try:
+    lines = open(file, encoding='utf-8', errors='replace').readlines()
+    idx = line - 1
+    for marker in MARKERS:
+        if 0 <= idx < len(lines) and marker in lines[idx].lower():
+            sys.exit(0)
+        if 0 <= idx - 1 < len(lines) and marker in lines[idx - 1].lower():
+            sys.exit(0)
+    sys.exit(1)
+except Exception:
+    sys.exit(1)
+PY
+}
+
+emit_incident() {
+  [[ -z "$INCIDENTS_TMP" || -z "$_INC_SEV" ]] && return 0
+  local file="$1" sl="$2" el="${3:-}" sc="${4:-}" ec="${5:-}" code="${6:-}"
+  local min_sev="${INCIDENTS_MIN_SEVERITY,,}"
+  case "$min_sev" in
+    critical) [[ "$_INC_SEV" != "critical" ]] && return 0 ;;
+    warning)  [[ "$_INC_SEV" == "info" ]] && return 0 ;;
+  esac
+  local title="${_INC_TITLE:-Finding}"
+  local desc="${_INC_DESC:-$title}"
+  local rule="$_INC_RULE"
+  [[ -z "$rule" ]] && rule="$(slugify_rule_id "$title")"
+  local source="${_INC_SOURCE:-$LANG_CODE}"
+  printf '%s' "$code" | python3 - "$INCIDENTS_TMP" "$_INC_SEV" "$rule" \
+    "$title" "$desc" "$LANG_CODE" "$file" "$sl" "$el" "$sc" "$ec" "$source" <<'PY' 2>/dev/null || true
+import json, sys
+code = sys.stdin.read()
+tmp, sev, rule, title, desc, lang, file, sl, el, sc, ec, src = sys.argv[1:13]
+obj = {"severity": sev, "rule_id": rule, "title": title, "description": desc,
+       "language": lang, "file": file, "start_line": int(sl), "source": src}
+if el: obj["end_line"] = int(el)
+if sc: obj["start_column"] = int(sc)
+if ec: obj["end_column"] = int(ec)
+if code.strip(): obj["code"] = code
+open(tmp, "a").write(json.dumps(obj) + "\n")
+PY
+}
+
+with_incident_context() {
+  local sev="$1" rule="$2" title="$3" desc="$4" source="$5"
+  shift 5
+  _INC_SEV="$sev" _INC_RULE="$rule" _INC_TITLE="$title" _INC_DESC="$desc" _INC_SOURCE="$source"
+  local rc
+  if "$@"; then rc=0; else rc=$?; fi
+  _INC_SEV="" _INC_RULE="" _INC_TITLE="" _INC_DESC="" _INC_SOURCE=""
+  return $rc
+}
+
 print_header() {
   say "\n${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
   say "${WHITE}${BOLD}$1${RESET}"
@@ -369,6 +451,11 @@ print_subheader() { say "\n${YELLOW}${BOLD}$BULLET $1${RESET}"; }
 
 print_finding() {
   local severity=$1
+  CURRENT_FINDING_SEV=""
+  CURRENT_FINDING_RULE=""
+  CURRENT_FINDING_TITLE=""
+  CURRENT_FINDING_DESC=""
+  CURRENT_FINDING_SOURCE=""
   case $severity in
     good)
       local title=$2
@@ -377,6 +464,11 @@ print_finding() {
     *)
       local raw_count=$2; local title=$3; local description="${4:-}"
       local count; count=$(printf '%s\n' "$raw_count" | awk 'END{print $0+0}')
+      CURRENT_FINDING_SEV="$severity"
+      CURRENT_FINDING_TITLE="$title"
+      CURRENT_FINDING_DESC="$description"
+      CURRENT_FINDING_SOURCE="ubs-java"
+      CURRENT_FINDING_RULE="$(slugify_rule_id "$title")"
       case $severity in
         critical)
           CRITICAL_COUNT=$((CRITICAL_COUNT + count))
@@ -408,9 +500,24 @@ print_finding() {
 }
 
 print_code_sample() {
-  local file=$1; local line=$2; local code=$3
+  local file=$1; local line=$2; local code=$3; local end_line="${4:-}"; local start_col="${5:-}"; local end_col="${6:-}"
+  if [[ -n "$INCIDENTS_TMP" ]]; then
+    is_suppressed "$file" "$line" && return 0
+    emit_incident "$file" "$line" "$end_line" "$start_col" "$end_col" "$code"
+  fi
   say "${GRAY}      $file:$line${RESET}"
   say "${WHITE}      $code${RESET}"
+}
+
+print_code_sample_current() {
+  local file=$1; local line=$2; local code=$3; local end_line="${4:-}"; local start_col="${5:-}"; local end_col="${6:-}"
+  local inc_title="${CURRENT_FINDING_TITLE:-Finding}"
+  local inc_desc="${CURRENT_FINDING_DESC:-$inc_title}"
+  local inc_rule="${CURRENT_FINDING_RULE:-$(slugify_rule_id "$inc_title")}"
+  local inc_sev="${CURRENT_FINDING_SEV:-info}"
+  local inc_source="${CURRENT_FINDING_SOURCE:-$LANG_CODE}"
+  with_incident_context "$inc_sev" "$inc_rule" "$inc_title" "$inc_desc" "$inc_source" \
+    print_code_sample "$file" "$line" "$code" "$end_line" "$start_col" "$end_col"
 }
 
 # Parse grep/rg output line handling Windows drive letters (C:/path...)
@@ -434,7 +541,8 @@ show_detailed_finding() {
     [[ -z "$rawline" ]] && continue
     parse_grep_line "$rawline" || continue
     [[ -z "$PARSED_FILE" || -z "$PARSED_LINE" ]] && continue
-    print_code_sample "$PARSED_FILE" "$PARSED_LINE" "$PARSED_CODE"; printed=$((printed+1))
+    print_code_sample_current "$PARSED_FILE" "$PARSED_LINE" "$PARSED_CODE"
+    printed=$((printed+1))
     [[ $printed -ge $limit || $printed -ge $MAX_DETAILED ]] && break
   done < <("${GREP_RN[@]}" -e "$pattern" "$PROJECT_DIR" 2>/dev/null | head -n "$limit" || true) || true
 }
@@ -861,7 +969,7 @@ show_ast_examples() {
         continue
       fi
       if [[ -f "$file" && -n "$line" ]]; then code="$(sed -n "${line}p" "$file" | sed $'s/\t/  /g')"; fi
-      print_code_sample "$file" "$line" "${code:-$rest}"
+      print_code_sample_current "$file" "$line" "${code:-$rest}" "" "$col" ""
       printed=$((printed+1)); [[ $printed -ge $limit || $printed -ge $MAX_DETAILED ]] && break
     done < <( ( set +o pipefail; "${AST_GREP_CMD[@]}" --lang java --pattern "$pattern" -n "$PROJECT_DIR" 2>/dev/null || true ) | head -n "$limit" )
   fi
@@ -1752,7 +1860,7 @@ while IFS= read -r f; do
   hcc=$(grep -nE "int[[:space:]]+hashCode\s*\(" "$f" 2>/dev/null | wc -l | awk '{print $1+0}')
   if [ "$eqc" -gt 0 ] && [ "$hcc" -eq 0 ]; then
     print_finding "warning" 1 "equals without hashCode in $f" "Objects used in HashMap/Set will misbehave"
-    print_code_sample "$f" "$(grep -nE 'boolean[[:space:]]+equals\s*\(' "$f" | head -n1 | cut -d: -f1)" "equals(...) missing hashCode()"
+    print_code_sample_current "$f" "$(grep -nE 'boolean[[:space:]]+equals\s*\(' "$f" | head -n1 | cut -d: -f1)" "equals(...) missing hashCode()"
   fi
 done < <(find "$PROJECT_DIR" -type f \( -name "*.java" -o -name "*.kt" \) -print 2>/dev/null)
 
