@@ -223,6 +223,8 @@ Commits will be blocked if issues are found.
 
 **Note:** `br` is non-invasive and never executes git commands. After `br sync --flush-only`, you must manually run `git add .beads/ && git commit`.
 
+**Legacy IDs:** Existing issues may still use `bd-*` IDs. New issues use `ubs-*`.
+
 
 ### Daily Beads workflow
 
