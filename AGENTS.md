@@ -227,16 +227,16 @@ Commits will be blocked if issues are found.
 ### Daily Beads workflow
 
 **Note:** `br` is non-invasive and never executes git commands. After `br sync --flush-only`, you must manually run `git add .beads/ && git commit`.
-- **First-time setup:** Run `br help` once per environment to review command summaries and confirm the database is healthy. (If `br doctor` reports problems, fix them before coding.)citeturn0search1
-- **Pick work intentionally:** At the start of every session run `br ready --json` (or `br list --status open`) and claim a ready issue by calling `br update <issue-id> --status in_progress --assignee <your-handle>`. Never freehand a plan; always anchor work to an issue ID.citeturn0search1
-- **Log discovered tasks immediately:** Whenever you encounter new work, create an issue with `br create "Title" -d "context" -t <type> -p <priority> --json`, then relate it using `br dep add <new> <parent> --type discovered-from` or `--type blocks` as appropriate. This replaces ad-hoc TODO lists and preserves provenance automatically.citeturn0search1
-- **Keep dependencies accurate:** Use `br dep tree <issue-id>` and `br show <issue-id>` to reason about blockers/parents before making changes. Update relationships instead of encoding them in prose.citeturn0search1
-- **Maintain status hygiene:** While working, keep the issue updated via `br update <issue-id> --status in_progress|blocked|review --assignee <you>`. When the work is done and the scanner is clean, close it with `br close <issue-id> --reason "Finished"` (optionally with `--json` for logs).citeturn0search1
+- **First-time setup:** Run `br help` once per environment to review command summaries and confirm the database is healthy. (If `br doctor` reports problems, fix them before coding.)
+- **Pick work intentionally:** At the start of every session run `br ready --json` (or `br list --status open`) and claim a ready issue by calling `br update <issue-id> --status in_progress --assignee <your-handle>`. Never freehand a plan; always anchor work to an issue ID.
+- **Log discovered tasks immediately:** Whenever you encounter new work, create an issue with `br create "Title" -d "context" -t <type> -p <priority> --json`, then relate it using `br dep add <new> <parent> --type discovered-from` or `--type blocks` as appropriate. This replaces ad-hoc TODO lists and preserves provenance automatically.
+- **Keep dependencies accurate:** Use `br dep tree <issue-id>` and `br show <issue-id>` to reason about blockers/parents before making changes. Update relationships instead of encoding them in prose.
+- **Maintain status hygiene:** While working, keep the issue updated via `br update <issue-id> --status in_progress|blocked|review --assignee <you>`. When the work is done and the scanner is clean, close it with `br close <issue-id> --reason "Finished"` (optionally with `--json` for logs).
 git add .beads/
 git commit -m "sync beads"
-- **Use br for handoffs:** When you pause or finish, reference the issue ID(s) you touched in your summary and point the next agent to the top entries from `br ready --json`. Never leave new work undocumented—agents are expected to live entirely within Beads for planning.citeturn0search1
+- **Use br for handoffs:** When you pause or finish, reference the issue ID(s) you touched in your summary and point the next agent to the top entries from `br ready --json`. Never leave new work undocumented—agents are expected to live entirely within Beads for planning.
 
-Remember: “Tell your coding agent to start using the `br` tool instead of markdown for all new work” is official guidance from the Beads project. Follow it here—every task, dependency, and follow-up belongs in br so future sessions can resume instantly.citeturn0search0
+Remember: “Tell your coding agent to start using the `br` tool instead of markdown for all new work” is official guidance from the Beads project. Follow it here—every task, dependency, and follow-up belongs in br so future sessions can resume instantly.
 
 ## Troubleshooting
 
