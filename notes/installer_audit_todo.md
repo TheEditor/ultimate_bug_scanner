@@ -14,6 +14,8 @@ _Updated: 2025-11-18 01:30 UTC_
 ## Detailed Task List
 
 ### 0. Growth / Differentiators Backlog (new beads)
+
+**Note:** `br` is non-invasive and never executes git commands. After `br sync --flush-only`, you must manually run `git add .beads/ && git commit`.
 - [ ] **ultimate_bug_scanner-ir4** – “Instant Confidence Onboarding”  
   - [x] Run `ubs doctor` automatically after install (opt-out flag).  
   - [x] Generate `~/.config/ubs/session.md` summary of install + doctor output.  

@@ -172,6 +172,8 @@ ubs . --incidents-jsonl out/incidents.jsonl --incidents-min-severity=warning
 
 ### Beads-ready incidents JSONL (per-sample parity)
 
+**Note:** `br` is non-invasive and never executes git commands. After `br sync --flush-only`, you must manually run `git add .beads/ && git commit`.
+
 UBS now emits a **per-incident JSONL** stream designed for reliable Beads issue creation. This is the new "robot-ready" output that mirrors what humans see in the console:
 
 - **Sample-level parity:** incidents are emitted only when a code sample is printed (i.e., `print_code_sample()`), so JSONL aligns with the text output's `DETAIL_LIMIT` and `MAX_DETAILED` sampling.
@@ -1723,7 +1725,6 @@ def get_theme(user):
 **Use UBS for:**
 - ✅ Fast multi-language scanning in AI workflows
 - ✅ Critical bug detection before commits
-- ✅ Git hooks that block obviously broken code
 - ✅ Claude/Cursor/AI agent quality guardrails
 - ✅ Polyglot projects where configuring 7 linters is painful
 
@@ -2531,7 +2532,9 @@ FORCE_SELF_UPDATE=1 ubs .
 
 ## 📊 **Beads/Strung JSONL Integration**
 
-For integration with [Beads](https://github.com/Dicklesworthstone/beads) or similar issue-tracking systems, UBS can emit findings as newline-delimited JSON (JSONL).
+**Note:** `br` is non-invasive and never executes git commands. After `br sync --flush-only`, you must manually run `git add .beads/ && git commit`.
+
+For integration with [Beads](https://github.com/Dicklesworthstone/beads_rust) or similar issue-tracking systems, UBS can emit findings as newline-delimited JSON (JSONL).
 
 ### Usage
 
@@ -2557,7 +2560,10 @@ Each line is a self-contained JSON object:
 
 ```bash
 # Pipe directly to beads for automatic issue creation
-ubs . --beads-jsonl=/dev/stdout | bd import --from-jsonl
+
+ubs . --beads-jsonl=/dev/stdout | br sync --import-only --from-jsonl
+git add .beads/
+git commit -m "sync beads"
 
 # Or append to existing tracking file
 ubs . --beads-jsonl=.beads/scan-results.jsonl

@@ -1,7 +1,7 @@
 # Codex TODO – 2025-11-18
 
 ## Global
-- [ ] Capture bead context and keep bd statuses in sync (mma, 5wx).
+- [ ] Capture bead context and keep br statuses in sync (mma, 5wx).
 - [x] Maintain documentation/tests/CLI help for lifecycle + shareable features; ensure README + --help updated (README + test-suite docs + usage refreshed 2025-11-18).
 - [ ] Ensure UBS scanner runs after code changes and before completion.
 
